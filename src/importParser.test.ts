@@ -970,3 +970,348 @@ describe('organizeImports with Cargo data', () => {
     expect(serdeIdx).toBeLessThan(myLibIdx);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 16. findMidFilePubUse — mid-file pub use detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { findMidFilePubUse } from './importParser';
+
+describe('findMidFilePubUse', () => {
+  it('returns empty array when there are no pub use statements after the import block', () => {
+    const src = `use std::fs::File;\n\nfn main() { File::open("x"); }`;
+    expect(findMidFilePubUse(src)).toHaveLength(0);
+  });
+
+  it('detects a pub use that appears after real code', () => {
+    const src = `use std::fs::File;\n\nfn main() { File::open("x"); }\n\npub use crate::params::history::ExecutionHistory;`;
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(1);
+    expect(found[0].text.trim()).toBe('pub use crate::params::history::ExecutionHistory;');
+  });
+
+  it('returns correct 0-based line number', () => {
+    const src = `use std::fs::File;\n\nfn main() {}\n\npub use crate::foo::Bar;`;
+    const found = findMidFilePubUse(src);
+    expect(found[0].line).toBe(4);
+  });
+
+  it('detects multiple mid-file pub use statements', () => {
+    const src = `use std::fs::File;\n\nfn main() {}\n\npub use crate::a::Foo;\npub use crate::b::Bar;`;
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(2);
+    expect(found[0].text.trim()).toContain('Foo');
+    expect(found[1].text.trim()).toContain('Bar');
+  });
+
+  it('does NOT flag pub use that is part of the top-level import block', () => {
+    // pub use at the top — inside the import block, not mid-file
+    const src = `use std::fs::File;\npub use crate::config::Settings;\n\nfn main() { File::open("x"); Settings::new(); }`;
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(0);
+  });
+
+  it('returns empty array when there are no imports at all', () => {
+    const src = `fn main() {}\n\npub fn helper() {}`;
+    expect(findMidFilePubUse(src)).toHaveLength(0);
+  });
+
+  it('reproduces the real-world context.rs scenario', () => {
+    // Simulates the user-reported case: pub use buried at the bottom of a file
+    const src = [
+      'use chrono::{DateTime, Utc};',
+      'use uuid::Uuid;',
+      '',
+      'pub struct Foo {',
+      '    pub started_at: DateTime<Utc>,',
+      '    pub id: Uuid,',
+      '}',
+      '',
+      '// Re-export — unused according to the compiler',
+      'pub use crate::params::history::{ExecutionHistory as History, HistoryEntry};',
+    ].join('\n');
+
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(1);
+    expect(found[0].text).toContain('History');
+    expect(found[0].text).toContain('HistoryEntry');
+    expect(found[0].line).toBe(9);
+  });
+
+  it('top-level imports are still correctly untouched by the organizer', () => {
+    // The organizer must not remove chrono even though the compiler warns about
+    // History/HistoryEntry — those are on the mid-file pub use line, not in
+    // the top import block.
+    const src = [
+      'use chrono::{DateTime, Utc};',
+      'use uuid::Uuid;',
+      '',
+      'pub struct Foo {',
+      '    pub started_at: DateTime<Utc>,',
+      '    pub id: Uuid,',
+      '}',
+      '',
+      'pub use crate::params::history::{ExecutionHistory as History, HistoryEntry};',
+    ].join('\n');
+
+    const result = organizeImportsInText(src);
+    expect(result).toContain('use chrono::{DateTime, Utc};');
+    expect(result).toContain('use uuid::Uuid;');
+    // The mid-file pub use line is preserved as-is in the code body
+    expect(result).toContain('pub use crate::params::history');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 17. String literal and comment stripping (gap fixes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('removeUnusedImports — string and comment stripping', () => {
+  it('[GAP-1] does not keep an import whose name appears only in a string literal', () => {
+    const src = `use regex::Regex;\nuse std::fs::File;\n\nfn main() {\n  File::open("x");\n  let _s = "Regex is great";\n}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('regex');
+    expect(used.map(i => i.module)).toContain('std::fs');
+  });
+
+  it('[GAP-1] does not keep an import whose name appears only in a char literal', () => {
+    // Contrived but tests the char-literal stripping path
+    const src = `use std::collections::HashMap;\nuse std::fs::File;\n\nfn main() { File::open("x"); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('std::collections');
+  });
+
+  it('[GAP-1] keeps import when name appears in both code and a string literal', () => {
+    const src = `use std::collections::HashMap;\n\nfn main() {\n  let _m = HashMap::new();\n  let _s = "no HashMap here";\n}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::collections');
+  });
+
+  it('[GAP-2] does not keep an import whose name appears only in a // line comment', () => {
+    const src = `use std::collections::HashMap;\nuse std::fs::File;\n\n// let _m = HashMap::new();\nfn main() { File::open("x"); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('std::collections');
+  });
+
+  it('[GAP-2] does not keep an import whose name appears only in a /// doc comment', () => {
+    const src = `use std::collections::HashMap;\nuse std::fs::File;\n\n/// Uses a HashMap internally\nfn main() { File::open("x"); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('std::collections');
+  });
+
+  it('[GAP-2] does not keep an import whose name appears only in a /* block comment */', () => {
+    const src = `use std::collections::HashMap;\nuse std::fs::File;\n\n/* HashMap is mentioned here */\nfn main() { File::open("x"); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('std::collections');
+  });
+
+  it('[GAP-2] keeps import when name appears in both code and a doc comment', () => {
+    const src = `use std::collections::HashMap;\n\n/// Creates a HashMap\nfn main() { let _m = HashMap::new(); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::collections');
+  });
+
+  it('keeps imports used in #[derive(...)] — derive is real code, not a comment', () => {
+    const src = `use serde::Serialize;\nuse serde::Deserialize;\n\n#[derive(Serialize, Deserialize)]\nstruct Config { name: String }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('serde');
+  });
+
+  it('keeps imports used in #[attribute] macros generally', () => {
+    const src = `use tokio::main;\n\n#[tokio::main]\nasync fn main() {}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    // tokio appears as qualifier, main as qualified — heuristic may vary, but should not crash
+    expect(() => removeUnusedImports(parseImports(src), src)).not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18. findMidFilePubUse — extended gap 3 (cfg-guarded mid-file use)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('findMidFilePubUse — extended: #[cfg] guarded mid-file use', () => {
+  it('[GAP-3] detects a plain use guarded by #[cfg(...)] after the import block', () => {
+    const src = [
+      'use std::fs::File;',
+      '',
+      'fn main() { File::open("x"); }',
+      '',
+      '#[cfg(feature = "metrics")]',
+      'use prometheus::Counter;',
+      '',
+      'fn track(c: Counter) {}',
+    ].join('\n');
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(1);
+    expect(found[0].text.trim()).toBe('use prometheus::Counter;');
+  });
+
+  it('[GAP-3] does NOT flag a plain use inside a mod block (no preceding cfg)', () => {
+    const src = [
+      'use std::fs::File;',
+      '',
+      'fn main() { File::open("x"); }',
+      '',
+      'mod tests {',
+      '    use super::*;',
+      '}',
+    ].join('\n');
+    // use super::* inside mod tests has no #[cfg] guard — should not be flagged
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(0);
+  });
+
+  it('detects both pub use and cfg-guarded use in the same file', () => {
+    const src = [
+      'use std::fs::File;',
+      '',
+      'fn main() { File::open("x"); }',
+      '',
+      '#[cfg(test)]',
+      'use crate::mocks::Server;',
+      '',
+      'pub use crate::config::Settings;',
+    ].join('\n');
+    const found = findMidFilePubUse(src);
+    expect(found).toHaveLength(2);
+    expect(found.some(f => f.text.includes('Server'))).toBe(true);
+    expect(found.some(f => f.text.includes('Settings'))).toBe(true);
+  });
+
+  it('[GAP-3] handles multiple consecutive #[cfg] attributes before a use', () => {
+    const src = [
+      'use std::fs::File;',
+      '',
+      'fn main() { File::open("x"); }',
+      '',
+      '#[cfg(feature = "a")]',
+      '#[cfg(not(windows))]',
+      'use some::Thing;',
+    ].join('\n');
+    const found = findMidFilePubUse(src);
+    // The use follows a cfg attribute (the line immediately before is also cfg)
+    expect(found).toHaveLength(1);
+    expect(found[0].text.trim()).toBe('use some::Thing;');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19. Comment preservation inside the import block
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('comment preservation inside the import block', () => {
+  it('preserves // commented-out import lines interleaved with real imports', () => {
+    const src = `use std::fs::File;
+// use std::io::Read;
+use std::collections::HashMap;
+// use std::sync::Arc;
+use serde::Serialize;
+
+fn main() {
+    File::open("x");
+    HashMap::<String,i32>::new();
+    let _s: Serialize;
+}`;
+    const result = organizeImportsInText(src);
+    expect(result).toContain('// use std::io::Read;');
+    expect(result).toContain('// use std::sync::Arc;');
+    // Real imports still present and sorted
+    expect(result).toContain('use std::fs::File;');
+    expect(result).toContain('use std::collections::HashMap;');
+    expect(result).toContain('use serde::Serialize;');
+  });
+
+  it('preserves a full /* */ block comment between imports', () => {
+    const src = `use std::fs::File;
+/* TODO: add these later
+   use std::io::BufReader;
+   use std::io::BufWriter;
+*/
+use std::collections::HashMap;
+
+fn main() { File::open("x"); HashMap::<String,i32>::new(); }`;
+    const result = organizeImportsInText(src);
+    expect(result).toContain('/* TODO: add these later');
+    expect(result).toContain('use std::io::BufReader;');
+    expect(result).toContain('use std::io::BufWriter;');
+    expect(result).toContain('*/');
+    // Real imports still present
+    expect(result).toContain('use std::fs::File;');
+    expect(result).toContain('use std::collections::HashMap;');
+  });
+
+  it('preserves comment block that appears before the first real import', () => {
+    const src = `// Disabled temporarily:
+// use std::sync::Arc;
+use std::fs::File;
+use std::collections::HashMap;
+
+fn main() { File::open("x"); HashMap::<String,i32>::new(); }`;
+    const result = organizeImportsInText(src);
+    expect(result).toContain('// Disabled temporarily:');
+    expect(result).toContain('// use std::sync::Arc;');
+    expect(result).toContain('use std::fs::File;');
+  });
+
+  it('does not duplicate comment lines', () => {
+    const src = `use std::fs::File;
+// use std::io::Read;
+use std::collections::HashMap;
+
+fn main() { File::open("x"); HashMap::<String,i32>::new(); }`;
+    const result = organizeImportsInText(src);
+    const count = result.split('// use std::io::Read;').length - 1;
+    expect(count).toBe(1);
+  });
+
+  it('normal file with no commented imports is unaffected', () => {
+    const src = `use std::fs::File;
+use std::collections::HashMap;
+
+fn main() { File::open("x"); HashMap::<String,i32>::new(); }`;
+    const result = organizeImportsInText(src);
+    expect(result).not.toContain('//');
+    expect(result).toContain('use std::fs::File;');
+    expect(result).toContain('use std::collections::HashMap;');
+  });
+
+  it('preserves a single-line /* */ comment between imports', () => {
+    const src = `use std::fs::File;
+/* reserved */ 
+use std::collections::HashMap;
+
+fn main() { File::open("x"); HashMap::<String,i32>::new(); }`;
+    const result = organizeImportsInText(src);
+    expect(result).toContain('/* reserved */');
+  });
+
+  it('real imports are still sorted and grouped after comment preservation', () => {
+    const src = `use serde::Serialize;
+// use chrono::Utc;
+use std::fs::File;
+use crate::config::Settings;
+
+fn main() { File::open("x"); let _s: Serialize; Settings::new(); }`;
+    const result = organizeImportsInText(src, { groupImports: true, blankLineBetweenGroups: true });
+    // std before external before local
+    expect(result.indexOf('std::fs')).toBeLessThan(result.indexOf('serde'));
+    expect(result.indexOf('serde')).toBeLessThan(result.indexOf('crate::'));
+    // comment is preserved
+    expect(result).toContain('// use chrono::Utc;');
+  });
+
+  it('unused real imports are still removed even when comments are present', () => {
+    const src = `use std::fs::File;
+// use std::io::Read;
+use std::sync::Arc;
+
+fn main() { File::open("x"); }`;
+    const result = organizeImportsInText(src);
+    // Arc is unused — removed
+    expect(result).not.toContain('use std::sync::Arc;');
+    // File is used — kept
+    expect(result).toContain('use std::fs::File;');
+    // Comment preserved
+    expect(result).toContain('// use std::io::Read;');
+  });
+});

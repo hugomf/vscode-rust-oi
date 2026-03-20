@@ -573,11 +573,35 @@ export function removeUnusedImports(
   const codeAfterImports = lines.slice(importEndLine + 1).join('\n');
 
   // ── 2. Collect every bare identifier that appears in the code ─────────────
+  //
+  // Pre-process: strip content that contains identifier-shaped text but is NOT
+  // actually a use of an imported name:
+  //
+  //   • String literals  — "Regex is great" contains "Regex" but that is not
+  //                         a use of the regex::Regex import.
+  //   • Doc comments     — /// Uses a HashMap is documentation, not code.
+  //   • Line comments    — // let x = HashMap::new() is dead code.
+  //   • Block comments   — /* ... */ may contain any identifier text.
+  //
+  // We blank out these regions before scanning so false-keep bugs are avoided.
+  // We do this ONLY for the identifier scan — the qualified-context scan still
+  // uses codeAfterImports so that real qualified usages like Utc::now() are
+  // still detected correctly.
+  const codeForIdScan = codeAfterImports
+    // Block comments: /* ... */ (non-greedy, dotAll)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    // Line comments (including doc comments /// and //)
+    .replace(/\/\/[^\n]*/g, ' ')
+    // Double-quoted string literals (handles \" escapes)
+    .replace(/"(?:[^"\\]|\\.)*"/g, '" "')
+    // Single-quoted char literals: 'a', '\n', '\u{1F600}'
+    .replace(/'(?:[^'\\]|\\.)*'/g, "' '");
+
   const usedIdentifiers = new Set<string>();
   const identifierRegex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
   let match: RegExpExecArray | null;
 
-  while ((match = identifierRegex.exec(codeAfterImports)) !== null) {
+  while ((match = identifierRegex.exec(codeForIdScan)) !== null) {
     usedIdentifiers.add(match[1]);
   }
 
@@ -767,6 +791,62 @@ export function buildOrganizedText(
   const importEndLine = Math.max(...allImports.map(imp => imp.endLine));
   const beforeImports = lines.slice(0, importStartLine).join('\n');
 
+  // Collect comment lines and entire block-comment regions that sit INSIDE the
+  // import block range but are not parsed as ImportStatements.  These would be
+  // silently dropped when we replace the entire import-block range, so we
+  // preserve them verbatim before the new organized import section.
+  //
+  // Strategy:
+  //   1. Mark every line that belongs to a real import.
+  //   2. Walk the import-block range.  When we hit a line that is NOT part of
+  //      a real import, collect it — including all lines of a /* */ block until
+  //      the closing */ is found.
+  const importLineSet = new Set(
+    allImports.flatMap(imp =>
+      Array.from({ length: imp.endLine - imp.startLine + 1 }, (_, k) => imp.startLine + k)
+    )
+  );
+
+  const commentParts: string[] = [];
+  let inBlockComment = false;
+
+  for (let li = importStartLine; li <= importEndLine; li++) {
+    if (importLineSet.has(li)) {
+      // This line is part of a real import — skip it, but close any block
+      // comment tracking (shouldn't happen in well-formed code, but be safe)
+      if (!inBlockComment) continue;
+    }
+
+    const raw = lines[li];
+    const trimmed = raw.trim();
+
+    if (inBlockComment) {
+      commentParts.push(raw);
+      if (trimmed.includes('*/')) inBlockComment = false;
+      continue;
+    }
+
+    // Detect start of a block comment
+    if (trimmed.startsWith('/*')) {
+      commentParts.push(raw);
+      if (!trimmed.includes('*/')) inBlockComment = true;  // multi-line block comment
+      continue;
+    }
+
+    // Line comment (includes ///, //)
+    if (trimmed.startsWith('//')) {
+      commentParts.push(raw);
+      continue;
+    }
+    // Lines that are part of a block comment body starting with * but not /*
+    if (trimmed.startsWith('*')) {
+      commentParts.push(raw);
+      continue;
+    }
+  }
+
+  const preservedComments = commentParts.join('\n');
+
   // Skip blank lines between the import block and the rest of the file so we
   // always produce exactly one blank-line separator.
   const rawAfterLines = lines.slice(importEndLine + 1);
@@ -779,6 +859,8 @@ export function buildOrganizedText(
   if (imports.length === 0 || (!hasCfg && imports.length === 0)) {
     let result = beforeImports;
     if (result && !result.endsWith('\n')) result += '\n';
+    // Still preserve any comment lines that were inside the import block
+    if (preservedComments) result += preservedComments + '\n';
     if (afterImports) result += afterImports;
     return result;
   }
@@ -789,6 +871,9 @@ export function buildOrganizedText(
 
   let result = beforeImports;
   if (result && !result.endsWith('\n')) result += '\n';
+  // Re-emit any comment lines that were inside the import block, before the
+  // organized imports so they read as a comment block preceding the imports.
+  if (preservedComments) result += preservedComments + '\n';
   result += importSection;
   if (afterImports) result += '\n\n' + afterImports;
 
@@ -832,6 +917,65 @@ function buildFlatImports(
 ): string {
   const sorted = sortAlphabetically ? sortImports(imports) : imports;
   return sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API: findMidFilePubUse
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MidFilePubUse {
+  line: number;   // 0-based line index
+  text: string;   // the raw line text
+}
+
+/**
+ * Finds `use` and `pub use` statements that appear AFTER the top-level import
+ * block. These are invisible to parseImports (which stops at the first
+ * non-import line) and cannot be automatically removed safely — they may be
+ * inside a mod block, impl block, or guarded by #[cfg(...)].
+ *
+ * This function surfaces them so the caller can warn the user.
+ *
+ * A line qualifies when:
+ *   - it starts with `use` or `pub use` (after trimming)
+ *   - it appears after the line where the top-level import block ends
+ *
+ * Note: `use` inside mod/impl/fn bodies is intentional Rust and should NOT
+ * be warned about in isolation — only warn when it follows a #[cfg(...)]
+ * attribute (likely an overlooked conditional import) or when it is `pub use`
+ * (a re-export that the compiler will flag if unused).
+ */
+export function findMidFilePubUse(text: string): MidFilePubUse[] {
+  const allImports = parseImports(text);
+  const importBlockEnd = allImports.length > 0
+    ? Math.max(...allImports.map(i => i.endLine))
+    : -1;
+
+  const results: MidFilePubUse[] = [];
+  const lines = text.split('\n');
+  let prevLineWasCfg = false;
+
+  for (let i = importBlockEnd + 1; i < lines.length; i++) {
+    const trimmed = sanitize(lines[i]).trim();
+
+    // Track whether the previous non-blank line was a #[cfg(...)] attribute
+    if (trimmed !== '') {
+      const isCfg = trimmed.startsWith('#[cfg(') || trimmed.startsWith('#[cfg (');
+
+      if (trimmed.startsWith('pub use ')) {
+        // Always warn about mid-file pub use — likely an unintentional re-export
+        results.push({ line: i, text: lines[i] });
+      } else if (trimmed.startsWith('use ') && prevLineWasCfg) {
+        // Warn about a plain use that is guarded by #[cfg] mid-file —
+        // this is an import that the organizer cannot see or process
+        results.push({ line: i, text: lines[i] });
+      }
+
+      prevLineWasCfg = isCfg;
+    }
+  }
+
+  return results;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
