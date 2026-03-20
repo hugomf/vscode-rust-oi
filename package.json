@@ -1,0 +1,77 @@
+{
+  "name": "rust-import-organizer",
+  "displayName": "Rust Import Organizer",
+  "description": "Organize and sort Rust imports automatically",
+  "version": "0.1.0",
+  "publisher": "rust-tools",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:rust"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rust-import-organizer.organizeImports",
+        "title": "Organize Rust Imports"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "rust-import-organizer.organizeImports",
+        "key": "shift+alt+o",
+        "when": "editorTextFocus && editorLangId == rust"
+      }
+    ],
+    "configuration": {
+      "title": "Rust Import Organizer",
+      "properties": {
+        "rust-import-organizer.groupImports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Group imports by category (std, external, local)"
+        },
+        "rust-import-organizer.sortAlphabetically": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sort imports alphabetically within groups"
+        },
+        "rust-import-organizer.blankLineBetweenGroups": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add blank line between import groups"
+        },
+        "rust-import-organizer.collapseSingleImports": {
+          "type": "boolean",
+          "default": false,
+          "description": "Collapse single-item imports to one line"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package --allow-missing-repository",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.3.2"
+  }
+}
