@@ -1,9 +1,9 @@
 {
   "name": "rust-import-organizer",
   "displayName": "Rust Import Organizer",
-  "description": "Organize and sort Rust imports automatically",
-  "version": "0.1.0",
-  "publisher": "hugomf-dev",
+  "description": "Organize, sort, group, and auto-import Rust use statements — with unused removal, Cargo.toml awareness, and disambiguation",
+  "version": "0.2.0",
+  "publisher": "hugomartinezf",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
   "engines": {
     "vscode": "^1.85.0"
@@ -20,38 +20,74 @@
     "commands": [
       {
         "command": "rust-import-organizer.organizeImports",
-        "title": "Organize Rust Imports"
+        "title": "Organize Rust Imports",
+        "category": "Rust"
+      },
+      {
+        "command": "rust-import-organizer.organizeImportsWithAutoImport",
+        "title": "Organize Rust Imports + Auto Import",
+        "category": "Rust"
       }
     ],
     "keybindings": [
       {
         "command": "rust-import-organizer.organizeImports",
         "key": "shift+alt+o",
+        "mac": "shift+option+o",
         "when": "editorTextFocus && editorLangId == rust"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "rust-import-organizer.organizeImports",
+          "when": "editorLangId == rust",
+          "group": "1_modification"
+        },
+        {
+          "command": "rust-import-organizer.organizeImportsWithAutoImport",
+          "when": "editorLangId == rust",
+          "group": "1_modification"
+        }
+      ]
+    },
     "configuration": {
       "title": "Rust Import Organizer",
       "properties": {
         "rust-import-organizer.groupImports": {
           "type": "boolean",
           "default": true,
-          "description": "Group imports by category (std, external, local)"
+          "description": "Group imports into std / external / local / cfg sections."
         },
         "rust-import-organizer.sortAlphabetically": {
           "type": "boolean",
           "default": true,
-          "description": "Sort imports alphabetically within groups"
+          "description": "Sort imports alphabetically within each group."
         },
         "rust-import-organizer.blankLineBetweenGroups": {
           "type": "boolean",
           "default": true,
-          "description": "Add blank line between import groups"
+          "description": "Insert a blank line between import groups."
         },
         "rust-import-organizer.collapseSingleImports": {
           "type": "boolean",
           "default": false,
-          "description": "Collapse single-item imports to one line"
+          "description": "Collapse grouped imports filtered to a single item (e.g. use std::path::{Path} → use std::path::Path;)."
+        },
+        "rust-import-organizer.removeUnused": {
+          "type": "boolean",
+          "default": true,
+          "description": "Remove unused imports. Set to false to only sort and group without removing anything."
+        },
+        "rust-import-organizer.enableAutoImport": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-import unresolved symbols when running 'Organize + Auto Import'. Requires Rust Analyzer."
+        },
+        "rust-import-organizer.organizeOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically organize imports when saving a Rust file."
         }
       }
     }

@@ -1,171 +1,146 @@
 import * as vscode from 'vscode';
-import {
-  parseImports,
-  organizeImports,
-  sortImports,
-  formatImport,
-  removeDuplicateImports,
-  removeUnusedImports,
-  ImportStatement,
-} from './importParser';
+import { organizeImportsInText } from './importParser';
+import { runAutoImport } from './autoImport';
+import { loadCargoWorkspace } from './cargoWorkspace';
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('=========================================');
   console.log('Rust Import Organizer is now active!');
-  console.log('=========================================');
 
-  vscode.window.showInformationMessage('Rust Import Organizer extension loaded!');
-
-  const organizeImportsCommand = vscode.commands.registerCommand(
-    'rust-import-organizer.organizeImports',
-    organizeRustImports
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'rust-import-organizer.organizeImports',
+      () => runOrganizeCommand(false)
+    ),
+    vscode.commands.registerCommand(
+      'rust-import-organizer.organizeImportsWithAutoImport',
+      () => runOrganizeCommand(true)
+    ),
   );
 
-  context.subscriptions.push(organizeImportsCommand);
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      { language: 'rust', scheme: 'file' },
+      new RustImportCodeActionProvider(),
+      { providedCodeActionKinds: RustImportCodeActionProvider.kinds }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onWillSaveTextDocument(event => {
+      if (event.document.languageId !== 'rust') return;
+      const config = vscode.workspace.getConfiguration('rust-import-organizer');
+      if (!config.get<boolean>('organizeOnSave', false)) return;
+      event.waitUntil(buildOrganizeEdit(event.document));
+    })
+  );
 }
 
-async function organizeRustImports(): Promise<void> {
-  console.log('organizeRustImports called');
-  const editor = vscode.window.activeTextEditor;
+class RustImportCodeActionProvider implements vscode.CodeActionProvider {
+  static readonly kinds = [vscode.CodeActionKind.SourceOrganizeImports];
 
+  provideCodeActions(
+    document: vscode.TextDocument,
+    _range: vscode.Range,
+    context: vscode.CodeActionContext,
+  ): vscode.CodeAction[] {
+    if (!context.only?.contains(vscode.CodeActionKind.SourceOrganizeImports)) {
+      return [];
+    }
+    const organize = new vscode.CodeAction(
+      'Organize Rust imports',
+      vscode.CodeActionKind.SourceOrganizeImports
+    );
+    organize.command = {
+      command: 'rust-import-organizer.organizeImports',
+      title: 'Organize Rust imports',
+      arguments: [document],
+    };
+    return [organize];
+  }
+}
+
+async function getOrganizeOptions(
+  document: vscode.TextDocument
+): Promise<Parameters<typeof organizeImportsInText>[1]> {
+  const config = vscode.workspace.getConfiguration('rust-import-organizer');
+
+  // Load Cargo.toml for accurate crate classification
+  const cargo = await loadCargoWorkspace(document.uri);
+
+  return {
+    groupImports: config.get<boolean>('groupImports', true),
+    sortAlphabetically: config.get<boolean>('sortAlphabetically', true),
+    blankLineBetweenGroups: config.get<boolean>('blankLineBetweenGroups', true),
+    collapseSingleImports: config.get<boolean>('collapseSingleImports', false),
+    removeUnused: config.get<boolean>('removeUnused', true),
+    knownExternalCrates: cargo.externalCrates,
+    knownLocalCrates: cargo.workspaceMembers,
+  };
+}
+
+async function runOrganizeCommand(withAutoImport: boolean): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    console.log('No active editor found');
     vscode.window.showErrorMessage('No active editor found');
     return;
   }
-
-  console.log('Editor language:', editor.document.languageId);
   if (editor.document.languageId !== 'rust') {
-    console.log('Not a Rust file');
     vscode.window.showErrorMessage('This command only works with Rust files');
     return;
   }
 
   const config = vscode.workspace.getConfiguration('rust-import-organizer');
-  const groupImports = config.get<boolean>('groupImports', true);
-  const sortAlphabetically = config.get<boolean>('sortAlphabetically', true);
-  const blankLineBetweenGroups = config.get<boolean>('blankLineBetweenGroups', true);
-  const collapseSingleImports = config.get<boolean>('collapseSingleImports', false);
+  const enableAutoImport = config.get<boolean>('enableAutoImport', true);
 
-  try {
-    const document = editor.document;
-    const text = document.getText();
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Rust Import Organizer', cancellable: false },
+    async progress => {
+      if (withAutoImport && enableAutoImport) {
+        progress.report({ message: 'Adding missing imports...' });
+        const autoResult = await runAutoImport(editor.document, progress);
+        if (autoResult.added.length > 0) await delay(300);
+        reportAutoImportSummary(autoResult);
+      }
 
-    console.log('Parsing imports...');
-    const imports = parseImports(text);
-    console.log('Found', imports.length, 'imports');
+      progress.report({ message: 'Organizing imports...' });
+      try {
+        const text = editor.document.getText();
+        const options = await getOrganizeOptions(editor.document);
+        const newText = organizeImportsInText(text, options);
 
-    if (imports.length === 0) {
-      console.log('No imports found');
-      vscode.window.showInformationMessage('No imports found to organize');
-      return;
+        if (newText !== text) {
+          const fullRange = new vscode.Range(
+            editor.document.positionAt(0),
+            editor.document.positionAt(text.length)
+          );
+          await editor.edit(editBuilder => editBuilder.replace(fullRange, newText));
+        }
+      } catch (error) {
+        vscode.window.showErrorMessage(`Error organizing imports: ${error}`);
+      }
     }
-
-    const uniqueImports = removeDuplicateImports(imports);
-    const usedImports = removeUnusedImports(uniqueImports, text);
-
-    const newText = buildOrganizedText(
-      usedImports,
-      text,
-      groupImports,
-      sortAlphabetically,
-      blankLineBetweenGroups,
-      collapseSingleImports
-    );
-
-    const fullRange = new vscode.Range(
-      document.positionAt(0),
-      document.positionAt(text.length)
-    );
-
-    await editor.edit(editBuilder => {
-      editBuilder.replace(fullRange, newText);
-    });
-
-    vscode.window.showInformationMessage('Imports organized successfully');
-  } catch (error) {
-    vscode.window.showErrorMessage(`Error organizing imports: ${error}`);
-  }
+  );
 }
 
-function buildOrganizedText(
-  imports: ImportStatement[],
-  originalText: string,
-  groupImports: boolean,
-  sortAlphabetically: boolean,
-  blankLineBetweenGroups: boolean,
-  collapseSingleImports: boolean
-): string {
-  if (imports.length === 0) {
-    return originalText;
-  }
-
-  const lines = originalText.split('\n');
-
-  const importStartLine = Math.min(...imports.map(imp => imp.startLine));
-  const importEndLine = Math.max(...imports.map(imp => imp.endLine));
-
-  const beforeImports = lines.slice(0, importStartLine).join('\n');
-
-  // Skip any blank lines that sat between the import block and the rest of the file
-  const rawAfterLines = lines.slice(importEndLine + 1);
-  const firstNonBlank = rawAfterLines.findIndex(l => l.trim() !== '');
-  const afterImports = firstNonBlank === -1 ? '' : rawAfterLines.slice(firstNonBlank).join('\n');
-
-  const importSection = groupImports
-    ? buildGroupedImports(imports, sortAlphabetically, blankLineBetweenGroups, collapseSingleImports)
-    : buildFlatImports(imports, sortAlphabetically, collapseSingleImports);
-
-  let result = beforeImports;
-  if (result && !result.endsWith('\n')) {
-    result += '\n';
-  }
-  result += importSection;
-  if (afterImports) {
-    result += '\n\n' + afterImports;
-  }
-
-  return result;
+async function buildOrganizeEdit(document: vscode.TextDocument): Promise<vscode.TextEdit[]> {
+  const text = document.getText();
+  const options = await getOrganizeOptions(document);
+  const newText = organizeImportsInText(text, options);
+  if (newText === text) return [];
+  const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(text.length));
+  return [vscode.TextEdit.replace(fullRange, newText)];
 }
 
-function buildGroupedImports(
-  imports: ImportStatement[],
-  sortAlphabetically: boolean,
-  blankLineBetweenGroups: boolean,
-  collapseSingleImports: boolean
-): string {
-  const organized = organizeImports(imports);
-  console.log('Grouped imports - std:', organized.stdImports.length, 'external:', organized.externalImports.length, 'local:', organized.localImports.length);
-  
-  const groups: string[] = [];
-
-  if (organized.stdImports.length > 0) {
-    const sorted = sortAlphabetically ? sortImports(organized.stdImports) : organized.stdImports;
-    groups.push(sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n'));
-  }
-
-  if (organized.externalImports.length > 0) {
-    const sorted = sortAlphabetically ? sortImports(organized.externalImports) : organized.externalImports;
-    groups.push(sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n'));
-  }
-
-  if (organized.localImports.length > 0) {
-    const sorted = sortAlphabetically ? sortImports(organized.localImports) : organized.localImports;
-    groups.push(sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n'));
-  }
-
-  return blankLineBetweenGroups ? groups.join('\n\n') : groups.join('\n');
+function reportAutoImportSummary(result: { added: string[]; skipped: string[]; failed: string[] }) {
+  const parts: string[] = [];
+  if (result.added.length > 0) parts.push(`Added ${result.added.length} import${result.added.length > 1 ? 's' : ''}`);
+  if (result.skipped.length > 0) parts.push(`Skipped ${result.skipped.length} (dismissed)`);
+  if (result.failed.length > 0) parts.push(`${result.failed.length} unresolved (no suggestions)`);
+  if (parts.length > 0) vscode.window.showInformationMessage(`Auto-import: ${parts.join(', ')}`);
 }
 
-function buildFlatImports(
-  imports: ImportStatement[],
-  sortAlphabetically: boolean,
-  collapseSingleImports: boolean
-): string {
-  const sorted = sortAlphabetically ? sortImports(imports) : imports;
-  return sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n');
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export function deactivate() {
-  console.log('Rust Import Organizer is now deactivated');
-}
+export function deactivate() { }
