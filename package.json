@@ -3,7 +3,7 @@
   "displayName": "Rust Import Organizer",
   "description": "Organize and sort Rust imports automatically",
   "version": "0.1.0",
-  "publisher": "hugomf",
+  "publisher": "hugomf-dev",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
   "engines": {
     "vscode": "^1.85.0"
