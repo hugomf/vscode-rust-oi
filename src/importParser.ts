@@ -299,16 +299,27 @@ export function parseImports(text: string): ImportStatement[] {
   const lines = text.split('\n');
   const imports: ImportStatement[] = [];
   let i = 0;
+  let inBlockComment = false;
 
   while (i < lines.length) {
     const line = sanitize(lines[i]).trim();
 
-    // Skip blank lines and comments
+    // Track block comment state so we never parse `use` inside /* ... */
+    if (inBlockComment) {
+      if (line.includes('*/')) inBlockComment = false;
+      i++;
+      continue;
+    }
+    if (line.startsWith('/*')) {
+      if (!line.includes('*/')) inBlockComment = true;  // multi-line block comment
+      i++;
+      continue;
+    }
+
+    // Skip blank lines and line comments
     if (
       line === '' ||
-      line.startsWith('//') ||
-      line.startsWith('/*') ||
-      line.startsWith('*')
+      line.startsWith('//')
     ) {
       i++;
       continue;
@@ -761,13 +772,26 @@ export function organizeImportsInText(
 }
 
 /**
- * Rebuild the source text with a new import block.
+ * Rebuild the source text with organized imports.
+ *
+ * Core principle: ONLY the lines that belong to real `use` statements are
+ * replaced. Every other line in the file — comments, blank lines, file-level
+ * doc comments, code — is left exactly where it is.
+ *
+ * Algorithm:
+ *   1. Build the organized import text (sorted, grouped, filtered).
+ *   2. Reconstruct the file line-by-line:
+ *      - Lines BEFORE the import block: copied verbatim.
+ *      - Lines INSIDE the import block range:
+ *          • Lines that belong to a real use statement: replaced with the
+ *            next line from the organized import section.
+ *          • All other lines (comments, blanks): copied verbatim.
+ *      - Lines AFTER the import block: copied verbatim, with exactly one
+ *        blank line separator if the import block ends without one.
  *
  * @param imports     Imports to write (already filtered/deduped).
  * @param allImports  All imports from the original file — used to determine
- *                    the exact line range to replace. Must NOT be the filtered
- *                    list, otherwise removed imports that appear before kept
- *                    ones leak into `beforeImports` verbatim.
+ *                    the exact line range to replace.
  * @param originalText The full source text.
  * @param options     Formatting options.
  */
@@ -789,95 +813,93 @@ export function buildOrganizedText(
   const lines = originalText.split('\n');
   const importStartLine = Math.min(...allImports.map(imp => imp.startLine));
   const importEndLine = Math.max(...allImports.map(imp => imp.endLine));
-  const beforeImports = lines.slice(0, importStartLine).join('\n');
 
-  // Collect comment lines and entire block-comment regions that sit INSIDE the
-  // import block range but are not parsed as ImportStatements.  These would be
-  // silently dropped when we replace the entire import-block range, so we
-  // preserve them verbatim before the new organized import section.
-  //
-  // Strategy:
-  //   1. Mark every line that belongs to a real import.
-  //   2. Walk the import-block range.  When we hit a line that is NOT part of
-  //      a real import, collect it — including all lines of a /* */ block until
-  //      the closing */ is found.
+  // Build the set of line indices that belong to real use statements so we
+  // know exactly which lines to replace vs leave alone.
   const importLineSet = new Set(
     allImports.flatMap(imp =>
       Array.from({ length: imp.endLine - imp.startLine + 1 }, (_, k) => imp.startLine + k)
     )
   );
 
-  const commentParts: string[] = [];
-  let inBlockComment = false;
+  // ── Build the organized import lines ──────────────────────────────────────
+  // If every import was removed, the organized section is empty.
+  let organizedLines: string[] = [];
 
-  for (let li = importStartLine; li <= importEndLine; li++) {
-    if (importLineSet.has(li)) {
-      // This line is part of a real import — skip it, but close any block
-      // comment tracking (shouldn't happen in well-formed code, but be safe)
-      if (!inBlockComment) continue;
-    }
-
-    const raw = lines[li];
-    const trimmed = raw.trim();
-
-    if (inBlockComment) {
-      commentParts.push(raw);
-      if (trimmed.includes('*/')) inBlockComment = false;
-      continue;
-    }
-
-    // Detect start of a block comment
-    if (trimmed.startsWith('/*')) {
-      commentParts.push(raw);
-      if (!trimmed.includes('*/')) inBlockComment = true;  // multi-line block comment
-      continue;
-    }
-
-    // Line comment (includes ///, //)
-    if (trimmed.startsWith('//')) {
-      commentParts.push(raw);
-      continue;
-    }
-    // Lines that are part of a block comment body starting with * but not /*
-    if (trimmed.startsWith('*')) {
-      commentParts.push(raw);
-      continue;
-    }
-  }
-
-  const preservedComments = commentParts.join('\n');
-
-  // Skip blank lines between the import block and the rest of the file so we
-  // always produce exactly one blank-line separator.
-  const rawAfterLines = lines.slice(importEndLine + 1);
-  const firstNonBlank = rawAfterLines.findIndex(l => l.trim() !== '');
-  const afterImports = firstNonBlank === -1 ? '' : rawAfterLines.slice(firstNonBlank).join('\n');
-
-  // If every non-cfg import was filtered out we still need to emit cfg imports.
-  // Only delete the block entirely when there is truly nothing left.
   const hasCfg = imports.some(imp => imp.cfgAttribute);
-  if (imports.length === 0 || (!hasCfg && imports.length === 0)) {
-    let result = beforeImports;
-    if (result && !result.endsWith('\n')) result += '\n';
-    // Still preserve any comment lines that were inside the import block
-    if (preservedComments) result += preservedComments + '\n';
-    if (afterImports) result += afterImports;
-    return result;
+  if (imports.length > 0 || hasCfg) {
+    const importSection = groupImports
+      ? buildGroupedImports(imports, sortAlphabetically, blankLineBetweenGroups, collapseSingleImports, knownExternalCrates, knownLocalCrates)
+      : buildFlatImports(imports, sortAlphabetically, collapseSingleImports);
+    organizedLines = importSection.split('\n');
   }
 
-  const importSection = groupImports
-    ? buildGroupedImports(imports, sortAlphabetically, blankLineBetweenGroups, collapseSingleImports, knownExternalCrates, knownLocalCrates)
-    : buildFlatImports(imports, sortAlphabetically, collapseSingleImports);
+  // ── Collect the line indices of real import slots, in document order ───────
+  // These are the ONLY lines we will replace. Everything else is copied verbatim.
+  const importSlots = Array.from(importLineSet).sort((a, b) => a - b);
 
-  let result = beforeImports;
-  if (result && !result.endsWith('\n')) result += '\n';
-  // Re-emit any comment lines that were inside the import block, before the
-  // organized imports so they read as a comment block preceding the imports.
-  if (preservedComments) result += preservedComments + '\n';
-  result += importSection;
-  if (afterImports) result += '\n\n' + afterImports;
+  // ── Reconstruct the file ───────────────────────────────────────────────────
+  // Strategy: build a slot → replacement mapping, then walk the file once.
+  //
+  // Problem with naive slot-filling: if the organized order differs from the
+  // original order (sorting changes positions), we cannot assign organized
+  // line i to slot i. Instead we:
+  //   1. Distribute all organized lines across the available slots.
+  //   2. Where there are more organized lines than slots (multi-line expansion),
+  //      the extras are inserted after the last slot.
+  //   3. Where there are fewer organized lines than slots (removals), the
+  //      surplus slots are turned into empty strings (blank lines) which are
+  //      later collapsed.
+  const slotReplacement = new Map<number, string>();
+  for (let i = 0; i < importSlots.length; i++) {
+    slotReplacement.set(importSlots[i], organizedLines[i] ?? '');
+  }
 
-  return result;
+  // Lines that didn't fit into any slot (organized has more lines than slots)
+  const overflow = organizedLines.slice(importSlots.length);
+
+  const output: string[] = [];
+
+  for (let li = 0; li < lines.length; li++) {
+    if (li < importStartLine || li > importEndLine) {
+      output.push(lines[li]);
+      continue;
+    }
+
+    if (slotReplacement.has(li)) {
+      output.push(slotReplacement.get(li)!);
+      // Flush overflow lines immediately after the last slot
+      if (li === importSlots[importSlots.length - 1] && overflow.length > 0) {
+        output.push(...overflow);
+      }
+    } else {
+      // Not a real import line (comment, blank, etc.) — copy verbatim
+      output.push(lines[li]);
+    }
+  }
+
+  // Collapse runs of more than one consecutive blank line within and
+  // immediately after the import block (catches both gaps from removed imports
+  // and pre-existing multiple blank lines between the block and the first
+  // line of real code).
+  const firstCodeLine = output.findIndex(
+    (l, idx) => idx > importEndLine && l.trim() !== '' && !l.trim().startsWith('//')
+  );
+  const collapseEnd = firstCodeLine === -1 ? output.length : firstCodeLine;
+  const collapsed: string[] = [];
+  let blankRun = 0;
+
+  for (let li = 0; li < output.length; li++) {
+    if (li >= importStartLine && li <= collapseEnd && output[li].trim() === '') {
+      blankRun++;
+      if (blankRun <= 1) collapsed.push(output[li]);
+    } else {
+      blankRun = 0;
+      collapsed.push(output[li]);
+    }
+  }
+
+  return collapsed.join('\n');
 }
 
 function buildGroupedImports(
