@@ -130,7 +130,7 @@ jobs:
           echo "Packaged: $VSIX"
 
       - name: Upload .vsix artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: vsix-${{ steps.version.outputs.version }}
           path: "*.vsix"
@@ -193,14 +193,14 @@ jobs:
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: "*.vsix"
-          generate_release_notes: true
-          body: |
-            Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=hugomartinezf.rust-import-organizer)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" *.vsix \
+            --generate-notes \
+            --notes "Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=hugomartinezf.rust-import-organizer)
 
-            Or install the `.vsix` directly:
-            ```
-            code --install-extension rust-import-organizer-${{ needs.package.outputs.version }}.vsix
-            ```
+          Or install the \`.vsix\` directly:
+          \`\`\`
+          code --install-extension rust-import-organizer-${{ needs.package.outputs.version }}.vsix
+          \`\`\`"
