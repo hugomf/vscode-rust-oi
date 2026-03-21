@@ -2,6 +2,7 @@
   "name": "rust-import-organizer",
   "displayName": "Rust Organize Import tool",
   "description": "Organize, sort, group, and auto-import Rust use statements",
+  "publisher": "hugomartinezf",
   "icon": "icon.png",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
   "version": "0.2.6",
