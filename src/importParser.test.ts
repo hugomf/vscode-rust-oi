@@ -1315,3 +1315,133 @@ fn main() { File::open("x"); }`;
     expect(result).toContain('// use std::io::Read;');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 20. Implicit trait imports (method dispatch — never appear as bare identifiers)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('removeUnusedImports — implicit trait imports', () => {
+  it('[sqlx] keeps Row when .get() is called on a query result', () => {
+    const src = `use sqlx::{PgPool, Row};
+
+fn example(pool: &PgPool) {
+    let row = sqlx::query("SELECT id FROM t").fetch_optional(pool);
+    if let Some(r) = row {
+        let _id: i32 = r.get("id");
+    }
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    const sqlxImport = used.find(i => i.module === 'sqlx');
+    expect(sqlxImport).toBeDefined();
+    expect(sqlxImport!.items).toContain('Row');
+    expect(sqlxImport!.items).toContain('PgPool');
+  });
+
+  it('[sqlx] keeps Row in a grouped import even when only PgPool appears by name', () => {
+    const src = `use sqlx::{PgPool, Row};
+
+struct Repo { pool: PgPool }
+
+impl Repo {
+    async fn get_name(&self, id: i32) -> String {
+        let r = sqlx::query("SELECT name FROM t WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        r.get("name")
+    }
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    const sqlxImport = used.find(i => i.module === 'sqlx');
+    expect(sqlxImport!.items).toContain('Row');
+  });
+
+  it('[std::io] keeps Read when .read_to_string() is called', () => {
+    const src = `use std::io::Read;
+use std::fs::File;
+
+fn read_file(path: &str) -> String {
+    let mut f = File::open(path).unwrap();
+    let mut s = String::new();
+    f.read_to_string(&mut s).unwrap();
+    s
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::io');
+  });
+
+  it('[std::io] keeps Write when .write_all() is called', () => {
+    const src = `use std::io::Write;
+use std::fs::File;
+
+fn write_file(path: &str, data: &[u8]) {
+    let mut f = File::create(path).unwrap();
+    f.write_all(data).unwrap();
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::io');
+  });
+
+  it('[std::io] keeps BufRead when .lines() is called', () => {
+    const src = `use std::io::BufRead;
+use std::io::BufReader;
+use std::fs::File;
+
+fn read_lines(path: &str) {
+    let f = BufReader::new(File::open(path).unwrap());
+    for line in f.lines() { println!("{}", line.unwrap()); }
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::io');
+  });
+
+  it('[std::io] keeps Seek when .seek() is called', () => {
+    const src = `use std::io::Seek;
+use std::io::SeekFrom;
+use std::fs::File;
+
+fn rewind(f: &mut File) {
+    f.seek(SeekFrom::Start(0)).unwrap();
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    const ioImports = used.filter(i => i.module === 'std::io');
+    const items = ioImports.flatMap(i => i.items);
+    expect(items).toContain('Seek');
+  });
+
+  it('does NOT keep Row when there are no .get() calls', () => {
+    const src = `use sqlx::{PgPool, Row};
+
+struct Repo { pool: PgPool }
+
+impl Repo {
+    async fn count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    const sqlxImport = used.find(i => i.module === 'sqlx');
+    // Row should be dropped — no .get() calls
+    expect(sqlxImport?.items ?? []).not.toContain('Row');
+    // PgPool should be kept
+    expect(sqlxImport?.items ?? []).toContain('PgPool');
+  });
+
+  it('keeps Read when .read() is called (not just read_to_string)', () => {
+    const src = `use std::io::Read;
+use std::fs::File;
+
+fn read_bytes(path: &str) -> Vec<u8> {
+    let mut f = File::open(path).unwrap();
+    let mut buf = Vec::new();
+    f.read(&mut buf).unwrap();
+    buf
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::io');
+  });
+});

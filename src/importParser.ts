@@ -59,9 +59,13 @@ function collectStatement(
 
   for (let i = startIndex; i < lines.length; i++) {
     const sanitized = sanitize(lines[i]);
-    fullText += (i === startIndex ? '' : '\n') + sanitized;
+    // Strip trailing inline // comment before adding to fullText and before
+    // the semicolon check so that "use std::fs::File; // comment" is parsed
+    // correctly as a single-line import statement.
+    const withoutInlineComment = sanitized.replace(/\s*\/\/.*$/, '');
+    fullText += (i === startIndex ? '' : '\n') + withoutInlineComment;
 
-    if (sanitized.trimEnd().endsWith(';')) {
+    if (withoutInlineComment.trimEnd().endsWith(';')) {
       endIndex = i;
       break;
     }
@@ -269,7 +273,7 @@ function parseUseStatement(
   }
 
   // ── Simple: use module::item ──────────────────────────────────────────────
-  const simpleMatch = body.match(/^([\w]+(?:::[\w]+)*)$/);
+  const simpleMatch = body.match(/^((?:r#)?[\w]+(?:::(?:r#)?[\w]+)*)$/);
   if (simpleMatch) {
     const parts = simpleMatch[1].split('::');
     return {
@@ -656,7 +660,44 @@ export function removeUnusedImports(
     }
   }
 
-  // ── 4. Filter each import ─────────────────────────────────────────────────
+  // ── 4. Build set of trait names that are implicitly used via method dispatch.
+  //
+  // Some traits must be in scope for method calls to work (e.g. sqlx::Row for
+  // r.get(), std::io::Read for f.read()) even though the trait name itself
+  // never appears as a bare identifier in the code. We detect their usage by
+  // looking for characteristic method call patterns rather than identifier names.
+  const implicitlyUsedTraits = new Set<string>();
+
+  // sqlx::Row — needed when .get("field") is called on a query result row
+  if (/\.get\s*\(/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Row');
+  }
+  // sqlx::Executor — needed when .execute() / .fetch_one() etc are called directly on a pool/conn
+  if (/\.execute\s*\(|fetch_one|fetch_all|fetch_optional/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Executor');
+  }
+  // anyhow::Context — needed when .context() / .with_context() are called
+  if (/\.context\s*\(|\.with_context\s*\(/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Context');
+  }
+  // std::io::Read — needed when .read() / .read_to_string() are called
+  if (/\.read\s*\(|read_to_string|read_to_end/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Read');
+  }
+  // std::io::Write — needed when .write() / .write_all() / .flush() are called
+  if (/\.write\s*\(|write_all|flush\s*\(/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Write');
+  }
+  // std::io::BufRead — needed when .lines() / .read_line() are called
+  if (/\.lines\s*\(|read_line/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('BufRead');
+  }
+  // std::io::Seek — needed when .seek() is called
+  if (/\.seek\s*\(/.test(codeAfterImports)) {
+    implicitlyUsedTraits.add('Seek');
+  }
+
+  // ── 5. Filter each import ─────────────────────────────────────────────────
   const result: ImportStatement[] = [];
 
   for (const imp of imports) {
@@ -689,6 +730,8 @@ export function removeUnusedImports(
     if (imp.isGroup) {
       // Filter items individually
       const usedItems = imp.items.filter(item => {
+        // Implicit trait: used via method dispatch, never appears as bare identifier
+        if (implicitlyUsedTraits.has(item)) return true;
         if (!usedIdentifiers.has(item)) return false;
         if (qualifiedOnlyIdentifiers.has(item)) return false;
         return true;
@@ -707,7 +750,8 @@ export function removeUnusedImports(
       // Simple import
       const item = imp.items[0];
       const used =
-        usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item);
+        implicitlyUsedTraits.has(item) ||
+        (usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item));
 
       if (used) {
         result.push(imp);

@@ -2,7 +2,7 @@
   "name": "rust-import-organizer",
   "displayName": "Rust Organize Import tool",
   "description": "Organize, sort, group, and auto-import Rust use statements — with unused removal, Cargo.toml awareness, and disambiguation",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "hugomartinezf",
   "icoon": "icon.png",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
