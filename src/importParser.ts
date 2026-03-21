@@ -35,6 +35,8 @@ export interface OrganizedImports {
   localImports: ImportStatement[];
   /** Imports preceded by a #[cfg(...)] attribute — always placed last */
   cfgImports: ImportStatement[];
+  /** pub use re-exports, when pubUsePlacement != "inline" */
+  pubUseImports: ImportStatement[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,13 +420,15 @@ export function categorizeImport(
 export function organizeImports(
   imports: ImportStatement[],
   knownExternalCrates?: Set<string>,
-  knownLocalCrates?: Set<string>
+  knownLocalCrates?: Set<string>,
+  pubUsePlacement: 'inline' | 'first' | 'last' = 'inline'
 ): OrganizedImports {
   const organized: OrganizedImports = {
     stdImports: [],
     externalImports: [],
     localImports: [],
     cfgImports: [],
+    pubUseImports: [],
   };
 
   for (const imp of imports) {
@@ -433,6 +437,13 @@ export function organizeImports(
       organized.cfgImports.push(imp);
       continue;
     }
+
+    // pub use re-exports are routed to their own group when placement != inline
+    if (imp.isPublic && pubUsePlacement !== 'inline') {
+      organized.pubUseImports.push(imp);
+      continue;
+    }
+
     switch (categorizeImport(imp.module, knownExternalCrates, knownLocalCrates)) {
       case 'std':
         organized.stdImports.push(imp);
@@ -767,8 +778,41 @@ export function removeUnusedImports(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface OrganizeOptions {
-  /** Group imports into std / external / local sections. Default: true */
-  groupImports?: boolean;
+  /**
+   * Controls how imports are grouped.
+   *
+   * - `true`  (default) — three fixed groups: std / external / local.
+   * - `false`           — single flat block, no grouping.
+   * - `"preserve"`      — keep the developer's existing blank-line groups;
+   *                       only sort alphabetically within each group.
+   * - `"custom"`        — use `importOrder` to define explicit groups.
+   */
+  groupImports?: boolean | 'preserve' | 'custom';
+  /**
+   * Ordered array of module-path prefixes that define custom import groups.
+   * Only used when `groupImports` is `"custom"`.
+   *
+   * Each entry is a module prefix string. Imports are placed in the first
+   * group whose prefix matches the start of their module path.
+   * Use `"*"` as a catch-all for everything not matched by a named prefix.
+   *
+   * Special tokens:
+   *   - `"std"`  — all standard-library imports (std::, core::, alloc::)
+   *   - `"crate"` — all local imports (crate::, super::, self::)
+   *   - `"*"`    — catch-all for everything else
+   *
+   * Example: `["std", "tokio", "axum", "*", "crate"]`
+   * produces: std group, tokio group, axum group, remaining external, local.
+   */
+  importOrder?: string[];
+  /**
+   * Where `pub use` re-exports are placed in the output.
+   *
+   * - `"inline"` (default) — mixed in with regular imports by module category.
+   * - `"first"`            — own group at the very top (before std).
+   * - `"last"`             — own group at the very bottom (before cfg).
+   */
+  pubUsePlacement?: 'inline' | 'first' | 'last';
   /** Sort imports alphabetically within each group. Default: true */
   sortAlphabetically?: boolean;
   /** Insert a blank line between each group. Default: true */
@@ -847,6 +891,8 @@ export function buildOrganizedText(
 ): string {
   const {
     groupImports = true,
+    importOrder,
+    pubUsePlacement = 'inline',
     sortAlphabetically = true,
     blankLineBetweenGroups = true,
     collapseSingleImports = false,
@@ -872,9 +918,26 @@ export function buildOrganizedText(
 
   const hasCfg = imports.some(imp => imp.cfgAttribute);
   if (imports.length > 0 || hasCfg) {
-    const importSection = groupImports
-      ? buildGroupedImports(imports, sortAlphabetically, blankLineBetweenGroups, collapseSingleImports, knownExternalCrates, knownLocalCrates)
-      : buildFlatImports(imports, sortAlphabetically, collapseSingleImports);
+    let importSection: string;
+    if (groupImports === 'preserve') {
+      importSection = buildPreservedGroupImports(
+        imports, allImports, lines,
+        sortAlphabetically, blankLineBetweenGroups, collapseSingleImports
+      );
+    } else if (groupImports === 'custom' && importOrder && importOrder.length > 0) {
+      importSection = buildCustomGroupedImports(
+        imports, importOrder,
+        sortAlphabetically, blankLineBetweenGroups, collapseSingleImports,
+        knownExternalCrates, knownLocalCrates, pubUsePlacement
+      );
+    } else if (groupImports === true) {
+      importSection = buildGroupedImports(
+        imports, sortAlphabetically, blankLineBetweenGroups, collapseSingleImports,
+        knownExternalCrates, knownLocalCrates, pubUsePlacement
+      );
+    } else {
+      importSection = buildFlatImports(imports, sortAlphabetically, collapseSingleImports);
+    }
     organizedLines = importSection.split('\n');
   }
 
@@ -946,35 +1009,236 @@ export function buildOrganizedText(
   return collapsed.join('\n');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: emit a formatted group, with cfg entries always last
+// ─────────────────────────────────────────────────────────────────────────────
+
+function emitGroups(
+  groups: string[],
+  cfgImports: ImportStatement[],
+  collapseSingleImports: boolean,
+  blankLineBetweenGroups: boolean
+): string {
+  if (cfgImports.length > 0) {
+    const cfgLines = cfgImports.map(imp =>
+      `${imp.cfgAttribute}\n${formatImport(imp, collapseSingleImports)}`
+    );
+    groups.push(cfgLines.join('\n'));
+  }
+  return blankLineBetweenGroups ? groups.join('\n\n') : groups.join('\n');
+}
+
+function renderGroup(
+  group: ImportStatement[],
+  sortAlphabetically: boolean,
+  collapseSingleImports: boolean
+): string {
+  const sorted = sortAlphabetically ? sortImports(group) : group;
+  return sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: standard 3-group layout (std / external / local)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function buildGroupedImports(
   imports: ImportStatement[],
   sortAlphabetically: boolean,
   blankLineBetweenGroups: boolean,
   collapseSingleImports: boolean,
   knownExternalCrates?: Set<string>,
-  knownLocalCrates?: Set<string>
+  knownLocalCrates?: Set<string>,
+  pubUsePlacement: 'inline' | 'first' | 'last' = 'inline'
 ): string {
-  const organized = organizeImports(imports, knownExternalCrates, knownLocalCrates);
+  const organized = organizeImports(imports, knownExternalCrates, knownLocalCrates, pubUsePlacement);
   const groups: string[] = [];
 
-  // Regular groups: std → external → local
+  // pub use re-exports first (when placement = "first")
+  if (pubUsePlacement === 'first' && organized.pubUseImports.length > 0) {
+    groups.push(renderGroup(organized.pubUseImports, sortAlphabetically, collapseSingleImports));
+  }
+
+  // std → external → local
   for (const group of [organized.stdImports, organized.externalImports, organized.localImports]) {
     if (group.length === 0) continue;
-    const sorted = sortAlphabetically ? sortImports(group) : group;
-    groups.push(sorted.map(imp => formatImport(imp, collapseSingleImports)).join('\n'));
+    groups.push(renderGroup(group, sortAlphabetically, collapseSingleImports));
   }
 
-  // cfg-gated imports always go last, preserving their original order and
-  // each one preceded by its attribute line.
-  if (organized.cfgImports.length > 0) {
-    const cfgLines = organized.cfgImports.map(imp =>
-      `${imp.cfgAttribute}\n${formatImport(imp, collapseSingleImports)}`
-    );
-    groups.push(cfgLines.join('\n'));
+  // pub use re-exports last (when placement = "last")
+  if (pubUsePlacement === 'last' && organized.pubUseImports.length > 0) {
+    groups.push(renderGroup(organized.pubUseImports, sortAlphabetically, collapseSingleImports));
   }
 
-  return blankLineBetweenGroups ? groups.join('\n\n') : groups.join('\n');
+  return emitGroups(groups, organized.cfgImports, collapseSingleImports, blankLineBetweenGroups);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: custom group order layout
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STD_ROOTS = new Set(['std', 'core', 'alloc']);
+const LOCAL_ROOTS = new Set(['crate', 'super', 'self']);
+
+/**
+ * Assign an import to the first matching entry in importOrder.
+ * Returns the index of the matching entry, or the catch-all index.
+ */
+function matchImportOrder(
+  imp: ImportStatement,
+  importOrder: string[],
+  knownExternalCrates?: Set<string>,
+  knownLocalCrates?: Set<string>
+): number {
+  const root = imp.module.split('::')[0].replace(/-/g, '_');
+  const category = categorizeImport(imp.module, knownExternalCrates, knownLocalCrates);
+
+  // Two-pass strategy so specific tokens always beat a catch-all '*' that
+  // appears earlier in the array.  Without this, ['std', 'tokio', '*', 'crate']
+  // would match crate:: imports at '*' (index 2) instead of 'crate' (index 3).
+  //
+  // Pass 1: specific matches only (skip '*')
+  for (let i = 0; i < importOrder.length; i++) {
+    const entry = importOrder[i];
+    if (entry === '*') continue;
+
+    // Special category tokens
+    if (entry === 'std' && category === 'std') return i;
+    if (entry === 'crate' && category === 'local') return i;
+
+    // Literal prefix match: "tokio" matches "tokio", "tokio::runtime", etc.
+    if (root === entry || imp.module === entry || imp.module.startsWith(entry + '::')) {
+      return i;
+    }
+  }
+
+  // Pass 2: fall through to catch-all '*', or append at end if absent
+  const catchAll = importOrder.indexOf('*');
+  return catchAll === -1 ? importOrder.length : catchAll;
+}
+
+function buildCustomGroupedImports(
+  imports: ImportStatement[],
+  importOrder: string[],
+  sortAlphabetically: boolean,
+  blankLineBetweenGroups: boolean,
+  collapseSingleImports: boolean,
+  knownExternalCrates?: Set<string>,
+  knownLocalCrates?: Set<string>,
+  pubUsePlacement: 'inline' | 'first' | 'last' = 'inline'
+): string {
+  // Separate cfg and pub use (when not inline) upfront
+  const cfgImports: ImportStatement[] = [];
+  const pubUseImports: ImportStatement[] = [];
+  const regularImports: ImportStatement[] = [];
+
+  for (const imp of imports) {
+    if (imp.cfgAttribute) { cfgImports.push(imp); continue; }
+    if (imp.isPublic && pubUsePlacement !== 'inline') { pubUseImports.push(imp); continue; }
+    regularImports.push(imp);
+  }
+
+  // Bucket regular imports by their matching importOrder slot
+  const buckets = new Map<number, ImportStatement[]>();
+  for (const imp of regularImports) {
+    const idx = matchImportOrder(imp, importOrder, knownExternalCrates, knownLocalCrates);
+    if (!buckets.has(idx)) buckets.set(idx, []);
+    buckets.get(idx)!.push(imp);
+  }
+
+  // Emit in order
+  const groups: string[] = [];
+
+  if (pubUsePlacement === 'first' && pubUseImports.length > 0) {
+    groups.push(renderGroup(pubUseImports, sortAlphabetically, collapseSingleImports));
+  }
+
+  // Walk importOrder slots in order, emitting non-empty buckets
+  const maxSlot = Math.max(importOrder.length, ...buckets.keys());
+  for (let i = 0; i <= maxSlot; i++) {
+    const bucket = buckets.get(i);
+    if (bucket && bucket.length > 0) {
+      groups.push(renderGroup(bucket, sortAlphabetically, collapseSingleImports));
+    }
+  }
+
+  if (pubUsePlacement === 'last' && pubUseImports.length > 0) {
+    groups.push(renderGroup(pubUseImports, sortAlphabetically, collapseSingleImports));
+  }
+
+  return emitGroups(groups, cfgImports, collapseSingleImports, blankLineBetweenGroups);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: preserve existing group structure
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Group imports by the blank-line boundaries that existed between them in the
+ * original source, then sort alphabetically within each group.
+ */
+function buildPreservedGroupImports(
+  imports: ImportStatement[],
+  allImports: ImportStatement[],
+  originalLines: string[],
+  sortAlphabetically: boolean,
+  blankLineBetweenGroups: boolean,
+  collapseSingleImports: boolean
+): string {
+  // A new group starts whenever there is at least one blank line between
+  // consecutive imports in the original source.
+  const groups: ImportStatement[][] = [];
+  let currentGroup: ImportStatement[] = [];
+
+  for (let i = 0; i < imports.length; i++) {
+    if (i === 0) {
+      currentGroup.push(imports[i]);
+      continue;
+    }
+
+    const prevEnd = imports[i - 1].endLine;
+    const thisStart = imports[i].startLine;
+
+    // Check if there is a blank line between previous import end and this start
+    let hasBlankLine = false;
+    for (let li = prevEnd + 1; li < thisStart; li++) {
+      if (originalLines[li]?.trim() === '') {
+        hasBlankLine = true;
+        break;
+      }
+    }
+
+    if (hasBlankLine) {
+      if (currentGroup.length > 0) groups.push(currentGroup);
+      currentGroup = [imports[i]];
+    } else {
+      currentGroup.push(imports[i]);
+    }
+  }
+  if (currentGroup.length > 0) groups.push(currentGroup);
+
+  // Separate cfg imports (always last)
+  const cfgImports: ImportStatement[] = [];
+  const regularGroups: string[] = [];
+
+  for (const group of groups) {
+    const cfgs = group.filter(imp => imp.cfgAttribute);
+    const regular = group.filter(imp => !imp.cfgAttribute);
+    cfgImports.push(...cfgs);
+    if (regular.length > 0) {
+      regularGroups.push(renderGroup(regular, sortAlphabetically, collapseSingleImports));
+    }
+  }
+
+  // In preserve mode blank lines between groups already exist in the original
+  // source and are copied verbatim by the slot map.  Passing blankLineBetweenGroups
+  // to emitGroups would inject extra lines that overflow past the slot count and
+  // get spliced back in, producing spurious blank lines.  Always use false here.
+  return emitGroups(regularGroups, cfgImports, collapseSingleImports, false);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: flat (no grouping)
+// ─────────────────────────────────────────────────────────────────────────────
 
 function buildFlatImports(
   imports: ImportStatement[],

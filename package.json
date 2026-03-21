@@ -1,22 +1,26 @@
 {
   "name": "rust-import-organizer",
   "displayName": "Rust Organize Import tool",
-  "description": "Organize, sort, group, and auto-import Rust use statements — with unused removal, Cargo.toml awareness, and disambiguation",
-  "version": "0.2.5",
-  "publisher": "hugomartinezf",
-  "icoon": "icon.png",
+  "description": "Organize, sort, group, and auto-import Rust use statements",
+  "icon": "icon.png",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
+  "version": "0.2.6",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Programming Languages",
-    "Formatters"
+    "Formatters",
+    "Other"
   ],
   "activationEvents": [
     "onLanguage:rust"
   ],
   "main": "./out/extension.js",
+  "scripts": {
+    "test": "jest",
+    "build": "tsc",
+    "compile": "tsc -p ./"
+  },
   "contributes": {
     "commands": [
       {
@@ -35,7 +39,7 @@
         "command": "rust-import-organizer.organizeImports",
         "key": "shift+alt+o",
         "mac": "shift+option+o",
-        "when": "editorTextFocus && editorLangId == rust"
+        "when": "editorLangId == rust"
       }
     ],
     "menus": {
@@ -56,9 +60,24 @@
       "title": "Rust Import Organizer",
       "properties": {
         "rust-import-organizer.groupImports": {
-          "type": "boolean",
+          "type": [
+            "boolean",
+            "string"
+          ],
+          "enum": [
+            true,
+            false,
+            "preserve",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Three fixed groups: std / external / local",
+            "Single flat block, no grouping",
+            "Keep your existing blank-line groups; only sort within each group",
+            "Use importOrder to define fully custom groups"
+          ],
           "default": true,
-          "description": "Group imports into std / external / local / cfg sections."
+          "description": "Controls how imports are grouped."
         },
         "rust-import-organizer.sortAlphabetically": {
           "type": "boolean",
@@ -73,12 +92,12 @@
         "rust-import-organizer.collapseSingleImports": {
           "type": "boolean",
           "default": false,
-          "description": "Collapse grouped imports filtered to a single item (e.g. use std::path::{Path} → use std::path::Path;)."
+          "description": "Collapse grouped imports filtered to a single item (e.g. use std::path::{Path} \u2192 use std::path::Path)."
         },
         "rust-import-organizer.removeUnused": {
           "type": "boolean",
           "default": true,
-          "description": "Remove unused imports. Set to false to only sort and group without removing anything."
+          "description": "Remove unused imports. Disable to only sort and group without removing anything."
         },
         "rust-import-organizer.enableAutoImport": {
           "type": "boolean",
@@ -89,27 +108,39 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically organize imports when saving a Rust file."
+        },
+        "rust-import-organizer.importOrder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Ordered list of module prefixes that define custom import groups. Only used when `groupImports` is `\"custom\"`.\n\nSpecial tokens: `\"std\"` (matches std/core/alloc), `\"crate\"` (matches crate::/super::/self::), `\"*\"` (catch-all).\n\nExample: `[\"std\", \"tokio\", \"axum\", \"*\", \"crate\"]`"
+        },
+        "rust-import-organizer.pubUsePlacement": {
+          "type": "string",
+          "enum": [
+            "inline",
+            "first",
+            "last"
+          ],
+          "enumDescriptions": [
+            "Mixed in with regular imports by module category (default)",
+            "Own group at the very top, before std",
+            "Own group at the very bottom, before cfg"
+          ],
+          "default": "inline",
+          "description": "Where pub use re-exports are placed in the output."
         }
       }
     }
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts",
-    "package": "vsce package --allow-missing-repository",
-    "test": "jest"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^8.57.1",
-    "@typescript-eslint/parser": "^8.57.1",
-    "eslint": "^10.0.3",
     "jest": "^30.3.0",
-    "ts-jest": "^29.4.6",
-    "typescript": "^5.3.2"
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
   }
 }

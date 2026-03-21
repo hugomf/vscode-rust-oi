@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { organizeImportsInText } from './importParser';
+import { organizeImportsInText, findMidFilePubUse } from './importParser';
 import { runAutoImport } from './autoImport';
 import { loadCargoWorkspace } from './cargoWorkspace';
 
@@ -67,8 +67,13 @@ async function getOrganizeOptions(
   // Load Cargo.toml for accurate crate classification
   const cargo = await loadCargoWorkspace(document.uri);
 
+  // groupImports can be boolean, "preserve", or "custom"
+  const groupImportsSetting = config.get<boolean | string>('groupImports', true);
+
   return {
-    groupImports: config.get<boolean>('groupImports', true),
+    groupImports: groupImportsSetting as boolean | 'preserve' | 'custom',
+    importOrder: config.get<string[]>('importOrder', []),
+    pubUsePlacement: config.get<'inline' | 'first' | 'last'>('pubUsePlacement', 'inline'),
     sortAlphabetically: config.get<boolean>('sortAlphabetically', true),
     blankLineBetweenGroups: config.get<boolean>('blankLineBetweenGroups', true),
     collapseSingleImports: config.get<boolean>('collapseSingleImports', false),
@@ -114,6 +119,17 @@ async function runOrganizeCommand(withAutoImport: boolean): Promise<void> {
             editor.document.positionAt(text.length)
           );
           await editor.edit(editBuilder => editBuilder.replace(fullRange, newText));
+        }
+
+        // Warn about any pub use statements that appear after the import block —
+        // these are invisible to the organizer and may be unintentional re-exports.
+        const midFile = findMidFilePubUse(text);
+        if (midFile.length > 0) {
+          const lines = midFile.map(m => `line ${m.line + 1}`).join(', ');
+          const msg = midFile.length === 1
+            ? `Found a mid-file pub use on ${lines} — it cannot be organized automatically. Remove it manually if unused.`
+            : `Found ${midFile.length} mid-file pub use statements (${lines}) — they cannot be organized automatically.`;
+          vscode.window.showWarningMessage(msg);
         }
       } catch (error) {
         vscode.window.showErrorMessage(`Error organizing imports: ${error}`);

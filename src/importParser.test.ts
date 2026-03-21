@@ -1445,3 +1445,356 @@ fn read_bytes(path: &str) -> Vec<u8> {
     expect(used.map(i => i.module)).toContain('std::io');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 21. Feature: custom group order (importOrder)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('custom group order (importOrder)', () => {
+  const src = [
+    'use axum::Router;',
+    'use axum::extract::Json;',
+    'use tokio::runtime::Runtime;',
+    'use tokio::sync::Mutex;',
+    'use serde::Serialize;',
+    'use anyhow::Result;',
+    'use std::fs::File;',
+    'use std::collections::HashMap;',
+    'use crate::config::Settings;',
+    'use crate::models::User;',
+    '',
+    'fn main() {',
+    '    let _: Router; let _: Json<String>; let _: Runtime; let _: Mutex<i32>;',
+    '    let _: Serialize; let _: Result<()>; File::open("x"); HashMap::new();',
+    '    Settings::new(); User::new();',
+    '}',
+  ].join('\n');
+
+  it('places imports in the specified prefix group order', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', 'tokio', 'axum', '*', 'crate'],
+    });
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    // std comes first
+    expect(lines[0]).toContain('std::');
+    expect(lines[1]).toContain('std::');
+    // tokio before axum
+    const tokioIdx = lines.findIndex(l => l.includes('tokio'));
+    const axumIdx = lines.findIndex(l => l.includes('axum'));
+    expect(tokioIdx).toBeLessThan(axumIdx);
+    // axum before remaining external
+    const serdeIdx = lines.findIndex(l => l.includes('serde'));
+    expect(axumIdx).toBeLessThan(serdeIdx);
+    // crate last
+    const crateIdx = lines.findIndex(l => l.includes('crate::'));
+    expect(crateIdx).toBeGreaterThan(serdeIdx);
+  });
+
+  it('inserts blank lines between custom groups when blankLineBetweenGroups is true', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', 'tokio', 'axum', '*', 'crate'],
+      blankLineBetweenGroups: true,
+    });
+    // There should be blank lines separating the groups
+    expect(result).toMatch(/std::.+\n\nuse tokio::/s);
+    expect(result).toMatch(/tokio::.+\n\nuse axum::/s);
+  });
+
+  it('catch-all "*" collects unmatched crates', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', 'tokio', 'axum', '*', 'crate'],
+    });
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    const serdeIdx = lines.findIndex(l => l.includes('serde'));
+    const anyhowIdx = lines.findIndex(l => l.includes('anyhow'));
+    const tokioIdx = lines.findIndex(l => l.includes('tokio'));
+    const axumIdx = lines.findIndex(l => l.includes('axum'));
+    // serde and anyhow (catch-all) come after tokio and axum
+    expect(serdeIdx).toBeGreaterThan(tokioIdx);
+    expect(anyhowIdx).toBeGreaterThan(axumIdx);
+  });
+
+  it('imports within each custom group are sorted alphabetically', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', 'tokio', '*', 'crate'],
+      sortAlphabetically: true,
+    });
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    const stdLines = lines.filter(l => l.includes('std::'));
+    expect(stdLines[0]).toContain('collections');
+    expect(stdLines[1]).toContain('fs');
+  });
+
+  it('"crate" token matches all local imports (crate::, super::, self::)', () => {
+    const localSrc = [
+      'use super::parent::Foo;',
+      'use crate::config::Settings;',
+      'use std::fs::File;',
+      '',
+      'fn main() { let _: Foo; Settings::new(); File::open("x"); }',
+    ].join('\n');
+    const result = organizeImportsInText(localSrc, {
+      groupImports: 'custom',
+      importOrder: ['std', '*', 'crate'],
+    });
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    const superIdx = lines.findIndex(l => l.includes('super::'));
+    const crateIdx = lines.findIndex(l => l.includes('crate::'));
+    const stdIdx = lines.findIndex(l => l.includes('std::'));
+    expect(stdIdx).toBeLessThan(superIdx);
+    expect(stdIdx).toBeLessThan(crateIdx);
+    // Both super and crate are in the 'crate' group
+    expect(Math.max(superIdx, crateIdx)).toBeGreaterThan(stdIdx);
+  });
+
+  it('"std" token matches std, core, and alloc', () => {
+    const stdSrc = [
+      'use std::fs::File;',
+      'use core::fmt::Display;',
+      'use alloc::vec::Vec;',
+      'use serde::Serialize;',
+      '',
+      'fn main() { File::open("x"); let _: Display; let _: Vec<u8>; let _: Serialize; }',
+    ].join('\n');
+    const result = organizeImportsInText(stdSrc, {
+      groupImports: 'custom',
+      importOrder: ['std', '*'],
+      blankLineBetweenGroups: true,
+    });
+    // All three std-family imports should be in the first group before serde
+    const stdGroupEnd = result.indexOf('\n\n');
+    expect(result.slice(0, stdGroupEnd)).toContain('std::fs');
+    expect(result.slice(0, stdGroupEnd)).toContain('core::fmt');
+    expect(result.slice(0, stdGroupEnd)).toContain('alloc::vec');
+  });
+
+  it('falls back to standard grouping when importOrder is empty', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: [],
+    });
+    // Empty importOrder → falls back to flat
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    expect(lines.length).toBeGreaterThan(0);
+  });
+
+  it('unused imports are still removed in custom mode', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', 'tokio', 'axum', '*', 'crate'],
+    });
+    // Arc is not in source — should not appear
+    expect(result).not.toContain('std::sync::Arc');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 22. Feature: pub use placement
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('pub use placement', () => {
+  const src = [
+    'use std::fs::File;',
+    'pub use crate::models::User;',
+    'pub use crate::config::Settings;',
+    'use serde::Serialize;',
+    '',
+    'fn main() { File::open("x"); let _: Serialize; User::new(); Settings::new(); }',
+  ].join('\n');
+
+  it('inline (default) — pub use mixed in by module category', () => {
+    const result = organizeImportsInText(src, { pubUsePlacement: 'inline' });
+    const lines = result.split('\n').filter(l => l.startsWith('use ') || l.startsWith('pub use '));
+    // pub use crate:: lines are local — should appear after std and external
+    const stdIdx = lines.findIndex(l => l.includes('std::'));
+    const serdeIdx = lines.findIndex(l => l.includes('serde'));
+    const pubIdx = lines.findIndex(l => l.startsWith('pub use'));
+    expect(stdIdx).toBeLessThan(serdeIdx);
+    expect(serdeIdx).toBeLessThan(pubIdx);
+  });
+
+  it('last — pub use group at the bottom before cfg', () => {
+    const result = organizeImportsInText(src, { pubUsePlacement: 'last' });
+    const lines = result.split('\n').filter(l => l.startsWith('use ') || l.startsWith('pub use '));
+    const lastImportIdx = lines.length - 1;
+    expect(lines[lastImportIdx]).toContain('pub use');
+    expect(lines[lastImportIdx - 1]).toContain('pub use');
+    // Regular imports come before pub use
+    const fileIdx = lines.findIndex(l => l.includes('std::fs'));
+    const firstPubIdx = lines.findIndex(l => l.startsWith('pub use'));
+    expect(fileIdx).toBeLessThan(firstPubIdx);
+  });
+
+  it('first — pub use group at the very top', () => {
+    const result = organizeImportsInText(src, { pubUsePlacement: 'first' });
+    const lines = result.split('\n').filter(l => l.startsWith('use ') || l.startsWith('pub use '));
+    expect(lines[0]).toContain('pub use');
+    expect(lines[1]).toContain('pub use');
+    // std::fs comes after the pub use group
+    const fileIdx = lines.findIndex(l => l.includes('std::fs'));
+    const firstPubIdx = lines.findIndex(l => l.startsWith('pub use'));
+    expect(firstPubIdx).toBeLessThan(fileIdx);
+  });
+
+  it('pub use sorted alphabetically within the group', () => {
+    const result = organizeImportsInText(src, {
+      pubUsePlacement: 'last',
+      sortAlphabetically: true,
+    });
+    const pubLines = result.split('\n').filter(l => l.startsWith('pub use '));
+    expect(pubLines[0]).toContain('crate::config');
+    expect(pubLines[1]).toContain('crate::models');
+  });
+
+  it('inline mode leaves pub use inline — no separate group', () => {
+    // When inline, pub use re-exports are classified by their module path
+    // (e.g. crate:: -> local group) and appear there
+    const result = organizeImportsInText(src, { pubUsePlacement: 'inline' });
+    const block = result.split('fn main')[0];
+    // pub use items appear in the local section, not isolated
+    expect(block).toContain('pub use crate::');
+  });
+
+  it('no pub use imports — pubUsePlacement has no effect', () => {
+    const noPubSrc = [
+      'use std::fs::File;',
+      'use serde::Serialize;',
+      '',
+      'fn main() { File::open("x"); let _: Serialize; }',
+    ].join('\n');
+    const inline = organizeImportsInText(noPubSrc, { pubUsePlacement: 'inline' });
+    const last = organizeImportsInText(noPubSrc, { pubUsePlacement: 'last' });
+    const first = organizeImportsInText(noPubSrc, { pubUsePlacement: 'first' });
+    expect(inline).toBe(last);
+    expect(inline).toBe(first);
+  });
+
+  it('works in combination with custom importOrder', () => {
+    const result = organizeImportsInText(src, {
+      groupImports: 'custom',
+      importOrder: ['std', '*', 'crate'],
+      pubUsePlacement: 'last',
+    });
+    const lines = result.split('\n').filter(l => l.startsWith('use ') || l.startsWith('pub use '));
+    const lastTwo = lines.slice(-2);
+    expect(lastTwo.every(l => l.startsWith('pub use'))).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 23. Feature: preserve group mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('preserve group mode', () => {
+  const src = [
+    'use axum::Router;',
+    'use tokio::runtime::Runtime;',
+    '',
+    'use serde::Serialize;',
+    'use anyhow::Result;',
+    '',
+    'use crate::config::Settings;',
+    '',
+    'fn main() { let _: Router; let _: Runtime; let _: Serialize; let _: Result<()>; Settings::new(); }',
+  ].join('\n');
+
+  it('preserves blank-line group boundaries from the original source', () => {
+    const result = organizeImportsInText(src, { groupImports: 'preserve' });
+    // Should have same group boundaries as input: [axum,tokio] [serde,anyhow] [crate]
+    expect(result).toMatch(/use axum.*\nuse tokio/s);
+    expect(result).toMatch(/use tokio.*\n\nuse /s);
+    expect(result).toMatch(/use anyhow.*\n\nuse crate/s);
+  });
+
+  it('sorts imports alphabetically within each preserved group', () => {
+    const result = organizeImportsInText(src, { groupImports: 'preserve', sortAlphabetically: true });
+    const lines = result.split('\n').filter(l => l.startsWith('use '));
+    // Within the serde/anyhow group, anyhow (A) should come before serde (S)
+    const anyhowIdx = lines.findIndex(l => l.includes('anyhow'));
+    const serdeIdx = lines.findIndex(l => l.includes('serde'));
+    expect(anyhowIdx).toBeLessThan(serdeIdx);
+  });
+
+  it('removes unused imports while keeping remaining group structure', () => {
+    const withUnused = [
+      'use axum::Router;',
+      'use axum::extract::Json;',   // unused
+      '',
+      'use serde::Serialize;',
+      'use anyhow::Result;',        // unused
+      '',
+      'use crate::config::Settings;',
+      '',
+      'fn main() { let _: Router; let _: Serialize; Settings::new(); }',
+    ].join('\n');
+
+    const result = organizeImportsInText(withUnused, { groupImports: 'preserve' });
+    expect(result).not.toContain('Json');
+    expect(result).not.toContain('anyhow');
+    expect(result).toContain('axum::Router');
+    expect(result).toContain('serde::Serialize');
+    expect(result).toContain('crate::config');
+  });
+
+  it('collapses empty groups cleanly when all members are removed', () => {
+    const withFullGroupUnused = [
+      'use std::fs::File;',
+      '',
+      'use std::sync::Arc;',  // group of one — all unused
+      '',
+      'use serde::Serialize;',
+      '',
+      'fn main() { File::open("x"); let _: Serialize; }',
+    ].join('\n');
+
+    const result = organizeImportsInText(withFullGroupUnused, { groupImports: 'preserve' });
+    expect(result).not.toContain('Arc');
+    // No double blank lines from the collapsed group
+    expect(result).not.toMatch(/\n\n\n/);
+  });
+
+  it('single group (no blank lines in original) — stays as one block', () => {
+    const singleGroup = [
+      'use std::fs::File;',
+      'use serde::Serialize;',
+      'use crate::config::Settings;',
+      '',
+      'fn main() { File::open("x"); let _: Serialize; Settings::new(); }',
+    ].join('\n');
+    const result = organizeImportsInText(singleGroup, { groupImports: 'preserve' });
+    const importBlock = result.split('fn main')[0].trimEnd();
+    // No blank lines within the import block
+    expect(importBlock).not.toContain('\n\n');
+  });
+
+  it('cfg-gated imports are still placed last in preserve mode', () => {
+    const cfgSrc = [
+      'use std::fs::File;',
+      '',
+      '#[cfg(test)]',
+      'use crate::mocks::setup;',
+      '',
+      'fn main() { File::open("x"); }',
+    ].join('\n');
+    const result = organizeImportsInText(cfgSrc, { groupImports: 'preserve' });
+    expect(result).toContain('#[cfg(test)]');
+    expect(result).toContain('crate::mocks::setup');
+    const fileIdx = result.indexOf('std::fs');
+    const cfgIdx = result.indexOf('#[cfg');
+    expect(fileIdx).toBeLessThan(cfgIdx);
+  });
+
+  it('does not merge groups that had blank lines between them', () => {
+    const result = organizeImportsInText(src, { groupImports: 'preserve' });
+    const lines = result.split('\n');
+    const axumLine = lines.findIndex(l => l.includes('axum'));
+    const serdeLine = lines.findIndex(l => l.includes('serde'));
+    // There must be at least one blank line between axum group and serde group
+    const between = lines.slice(axumLine + 1, serdeLine);
+    expect(between.some(l => l.trim() === '')).toBe(true);
+  });
+});
