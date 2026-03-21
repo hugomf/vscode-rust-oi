@@ -29,6 +29,9 @@ Thumbs.db
 # ESLint
 .eslintcache
 
+# Rust build outputs
+rust-test/target/
+
 # Test files (if not meant to be committed)
 test-unused.rs
 test.rs

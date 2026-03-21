@@ -40,6 +40,15 @@ export interface OrganizedImports {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_INLINE_ITEMS = 3;
+const STD_ROOTS = new Set(['std', 'core', 'alloc']);
+const LOCAL_ROOTS = new Set(['crate', 'super', 'self']);
+type PubUsePlacement = 'inline' | 'first' | 'last';
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -207,7 +216,7 @@ function parseUseStatement(
 
   // ── Simple aliased: use module::Item as Alias ────────────────────────────
   const aliasMatch = body.match(
-    /^([\w]+(?:::[\w]+)*)\s+as\s+(\w+)$/
+    /^((?:r#)?[\w]+(?:::(?:r#)?[\w]+)*)\s+as\s+(\w+)$/
   );
   if (aliasMatch) {
     const fullPath = aliasMatch[1];
@@ -259,12 +268,36 @@ function parseUseStatement(
     }
 
     const statements: ImportStatement[] = order.map(mod => {
-      const items = byModule.get(mod)!;
+      const rawItems = byModule.get(mod)!;
+
+      // Each item may be "Item as Alias" — parse those out so the alias
+      // is stored in aliases[] and the bare name is stored in items[].
+      const items: string[] = [];
+      const aliases: (string | undefined)[] = [];
+      let hasAlias = false;
+
+      for (const raw of rawItems) {
+        const aliasMatch = raw.match(/^(.+?)\s+as\s+(\w+)$/);
+        if (aliasMatch) {
+          items.push(aliasMatch[1].trim());
+          aliases.push(aliasMatch[2].trim());
+          hasAlias = true;
+        } else {
+          items.push(raw);
+          aliases.push(undefined);
+        }
+      }
+
       return {
         originalText: fullText,
         module: mod,
         items,
-        isGroup: items.length > 1,
+        aliases: hasAlias ? aliases : undefined,
+        // isGroup is true whenever the original source used braces — even
+        // when only one item survives.  This preserves the collapseSingleImports
+        // option and prevents the item from being incorrectly collapsed on a
+        // second pass through the organizer.
+        isGroup: true,
         isPublic,
         startLine: startIndex,
         endLine: endIndex,
@@ -306,6 +339,7 @@ export function parseImports(text: string): ImportStatement[] {
   const imports: ImportStatement[] = [];
   let i = 0;
   let inBlockComment = false;
+  let seenCodeDeclaration = false;  // once true, no use statements can follow
 
   while (i < lines.length) {
     const line = sanitize(lines[i]).trim();
@@ -356,8 +390,8 @@ export function parseImports(text: string): ImportStatement[] {
       continue;
     }
 
-    // Match `use` or `pub use`
-    if (line.startsWith('use ') || line.startsWith('pub use ')) {
+    // Match `use` or `pub use` — only if no code declaration seen yet
+    if (!seenCodeDeclaration && (line.startsWith('use ') || line.startsWith('pub use '))) {
       const result = parseUseStatement(lines, i);
       if (result) {
         imports.push(...result.statements);
@@ -366,9 +400,17 @@ export function parseImports(text: string): ImportStatement[] {
       }
     }
 
-    // Stop at the first non-import, non-comment, non-blank line to avoid
-    // picking up `use` statements inside fn / mod bodies.
+    // Stop at the first non-import, non-comment, non-blank line.
+    // If we have already seen imports, stop immediately.
+    // If we have not seen imports yet, stop on any line that is clearly
+    // a code declaration (fn, struct, enum, impl, pub, mod, type, const,
+    // static, let, extern) — these cannot appear before the import block.
     if (imports.length > 0) {
+      break;
+    }
+    // Word boundary via lookahead — avoids backspace \b interpretation
+    if (/^(?:fn|pub|mod|impl|struct|enum|trait|type|const|static|let|extern|async|unsafe)(?![a-zA-Z0-9_])/.test(line)) {
+      seenCodeDeclaration = true;
       break;
     }
 
@@ -390,7 +432,6 @@ export function categorizeImport(
   // std, core and alloc are all part of the Rust standard library family.
   // core is the dependency-free subset; alloc adds heap allocation. Both are
   // shipped with every Rust toolchain and should appear in the std group.
-  const STD_ROOTS = new Set(['std', 'core', 'alloc']);
   const root = module.split('::')[0].replace(/-/g, '_');
 
   if (STD_ROOTS.has(root)) return 'std';
@@ -539,28 +580,45 @@ export function formatImport(imp: ImportStatement, collapseSingle: boolean): str
     return `${pub}use ${imp.module}::*;`;
   }
 
-  // Aliased simple import
-  if (imp.aliases && imp.aliases.some(Boolean)) {
-    const item = imp.items[0];
-    const alias = imp.aliases[0];
-    return alias
-      ? `${pub}use ${imp.module}::${item} as ${alias};`
-      : `${pub}use ${imp.module}::${item};`;
+  // Build item strings respecting per-item aliases.
+  // "Value as JsonValue" → item="Value", alias="JsonValue" → "Value as JsonValue"
+  const itemStrings = imp.items.map((item, idx) => {
+    const alias = imp.aliases?.[idx];
+    return alias ? `${item} as ${alias}` : item;
+  });
+
+  // Single item:
+  //   Aliased items (e.g. "Value as JsonValue"): always collapse to the simple
+  //   form `use mod::Value as JsonValue;` — braces around a single aliased item
+  //   add no clarity and the simple form is idiomatic Rust.
+  //
+  //   Plain items: respect collapseSingleImports.  When the import was originally
+  //   a multi-item group and the user has collapseSingleImports=false, keep the
+  //   braces (e.g. `use std::path::{Path};`).  Otherwise collapse.
+  if (imp.items.length === 1) {
+    const hasAlias = Boolean(imp.aliases?.[0]);
+    // Aliased: always simple form
+    if (hasAlias) {
+      return `${pub}use ${imp.module}::${itemStrings[0]};`;
+    }
+    // Plain: collapse unless user explicitly wants group braces preserved
+    if (!imp.isGroup || collapseSingle) {
+      return `${pub}use ${imp.module}::${itemStrings[0]};`;
+    }
+    return `${pub}use ${imp.module}::{${itemStrings[0]}};`;
   }
 
-  // Single item — collapse when requested (or always when there's only one item)
-  if (imp.items.length === 1 && (collapseSingle || !imp.isGroup)) {
-    return `${pub}use ${imp.module}::${imp.items[0]};`;
+  // Multiple items — sort by bare item name, keeping alias attached
+  const sortedPairs = imp.items
+    .map((item, idx) => ({ item, str: itemStrings[idx] }))
+    .sort((a, b) => a.item.localeCompare(b.item));
+  const sortedStrings = sortedPairs.map(p => p.str);
+
+  if (sortedStrings.length <= 3) {
+    return `${pub}use ${imp.module}::{${sortedStrings.join(', ')}};`;
   }
 
-  // Multiple items
-  const sortedItems = [...imp.items].sort();
-
-  if (sortedItems.length <= 3) {
-    return `${pub}use ${imp.module}::{${sortedItems.join(', ')}};`;
-  }
-
-  const itemsFormatted = sortedItems.map(item => `    ${item}`).join(',\n');
+  const itemsFormatted = sortedStrings.map(s => `    ${s}`).join(',\n');
   return `${pub}use ${imp.module}::{\n${itemsFormatted},\n};`;
 }
 
@@ -581,6 +639,20 @@ export function removeDuplicateImports(imports: ImportStatement[]): ImportStatem
   }
 
   return unique;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helper: check if identifier is used
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isIdentifierUsed(
+  name: string,
+  usedIdentifiers: Set<string>,
+  qualifiedOnly: Set<string>,
+  implicitTraits: Set<string>
+): boolean {
+  return implicitTraits.has(name) ||
+    (usedIdentifiers.has(name) && !qualifiedOnly.has(name));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,12 +797,12 @@ export function removeUnusedImports(
       continue;
     }
 
-    // Aliased simple import: check if the alias (or original name) is used
-    if (imp.aliases && imp.aliases.some(Boolean)) {
+    // Aliased simple import (non-group): check if the alias (or original name) is used
+    if (imp.aliases && imp.aliases.some(Boolean) && !imp.isGroup) {
       const alias = imp.aliases[0];
       const original = imp.items[0];
-      const aliasUsed = alias ? usedIdentifiers.has(alias) && !qualifiedOnlyIdentifiers.has(alias) : false;
-      const originalUsed = usedIdentifiers.has(original) && !qualifiedOnlyIdentifiers.has(original);
+      const aliasUsed = alias ? isIdentifierUsed(alias, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits) : false;
+      const originalUsed = isIdentifierUsed(original, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
 
       if (aliasUsed || originalUsed) {
         result.push(imp);
@@ -739,19 +811,46 @@ export function removeUnusedImports(
     }
 
     if (imp.isGroup) {
-      // Filter items individually
-      const usedItems = imp.items.filter(item => {
-        // Implicit trait: used via method dispatch, never appears as bare identifier
-        if (implicitlyUsedTraits.has(item)) return true;
-        if (!usedIdentifiers.has(item)) return false;
-        if (qualifiedOnlyIdentifiers.has(item)) return false;
-        return true;
+      // Filter items individually, respecting per-item aliases.
+      // e.g. use serde_json::{Value as JsonValue, json}
+      //   → item "Value" with alias "JsonValue": check if JsonValue (or Value) is used
+      //   → item "json" with no alias: check if json is used
+      const usedItems: string[] = [];
+      const usedAliases: (string | undefined)[] = [];
+
+      imp.items.forEach((item, idx) => {
+        const alias = imp.aliases?.[idx];
+
+        // Implicit trait: used via method dispatch
+        if (implicitlyUsedTraits.has(alias ?? item)) {
+          usedItems.push(item);
+          usedAliases.push(alias);
+          return;
+        }
+
+        if (alias) {
+          // Aliased item: check alias name (what user writes in code)
+          const aliasUsed = isIdentifierUsed(alias, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
+          const origUsed = isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
+          if (aliasUsed || origUsed) {
+            usedItems.push(item);
+            usedAliases.push(alias);
+          }
+        } else {
+          // Plain item
+          if (isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits)) {
+            usedItems.push(item);
+            usedAliases.push(undefined);
+          }
+        }
       });
 
       if (usedItems.length > 0) {
+        const hasAnyAlias = usedAliases.some(Boolean);
         result.push({
           ...imp,
           items: usedItems,
+          aliases: hasAnyAlias ? usedAliases : undefined,
           // Keep isGroup:true even when filtered down to a single item so that
           // formatImport can honour the collapseSingleImports option correctly.
           isGroup: imp.isGroup,
@@ -760,9 +859,7 @@ export function removeUnusedImports(
     } else {
       // Simple import
       const item = imp.items[0];
-      const used =
-        implicitlyUsedTraits.has(item) ||
-        (usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item));
+      const used = isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
 
       if (used) {
         result.push(imp);
@@ -941,29 +1038,49 @@ export function buildOrganizedText(
     organizedLines = importSection.split('\n');
   }
 
-  // ── Collect the line indices of real import slots, in document order ───────
-  // These are the ONLY lines we will replace. Everything else is copied verbatim.
+  // ── Collect slots ─────────────────────────────────────────────────────────
   const importSlots = Array.from(importLineSet).sort((a, b) => a - b);
 
-  // ── Reconstruct the file ───────────────────────────────────────────────────
-  // Strategy: build a slot → replacement mapping, then walk the file once.
+  // ── Build the combined slot list ───────────────────────────────────────────
   //
-  // Problem with naive slot-filling: if the organized order differs from the
-  // original order (sorting changes positions), we cannot assign organized
-  // line i to slot i. Instead we:
-  //   1. Distribute all organized lines across the available slots.
-  //   2. Where there are more organized lines than slots (multi-line expansion),
-  //      the extras are inserted after the last slot.
-  //   3. Where there are fewer organized lines than slots (removals), the
-  //      surplus slots are turned into empty strings (blank lines) which are
-  //      later collapsed.
-  const slotReplacement = new Map<number, string>();
-  for (let i = 0; i < importSlots.length; i++) {
-    slotReplacement.set(importSlots[i], organizedLines[i] ?? '');
+  // We distribute organizedLines across a merged list of:
+  //   • use-statement slots  (from importLineSet)
+  //   • blank-line slots     (blank lines strictly between the first and last
+  //                           import slot — these absorb group separators)
+  //
+  // The merged list is sorted by line number so organizedLines are placed in
+  // document order.  Non-blank non-import lines (comments, section headers)
+  // are never included — they are always copied verbatim.
+  //
+  // This approach is idempotent: after the first pass the blank group
+  // separators already exist at the right positions, so the second pass
+  // finds them in the blank-slot list and maps the same content back.
+
+  const lastImportSlot = importSlots.length > 0 ? importSlots[importSlots.length - 1] : importEndLine;
+
+  // Blank lines strictly between first and last import slot.
+  // Only included when blankLineBetweenGroups is true — in preserve mode
+  // blank lines come from the original source and must stay verbatim.
+  const blankSlotsInRange: number[] = [];
+  if (blankLineBetweenGroups && groupImports !== 'preserve') {
+    for (let li = importStartLine; li < lastImportSlot; li++) {
+      if (!importLineSet.has(li) && lines[li]?.trim() === '') {
+        blankSlotsInRange.push(li);
+      }
+    }
   }
 
-  // Lines that didn't fit into any slot (organized has more lines than slots)
-  const overflow = organizedLines.slice(importSlots.length);
+  // Merge and sort: use-slots + blank-slots, ordered by line number
+  const allSlots = [...importSlots, ...blankSlotsInRange].sort((a, b) => a - b);
+
+  // ── Assign organizedLines to the merged slot list ──────────────────────────
+  const slotReplacement = new Map<number, string>();
+  for (let i = 0; i < allSlots.length; i++) {
+    slotReplacement.set(allSlots[i], organizedLines[i] ?? '');
+  }
+
+  // Any organized lines that didn't fit (more content than total slots)
+  const overflow = organizedLines.slice(allSlots.length);
 
   const output: string[] = [];
 
@@ -975,12 +1092,12 @@ export function buildOrganizedText(
 
     if (slotReplacement.has(li)) {
       output.push(slotReplacement.get(li)!);
-      // Flush overflow lines immediately after the last slot
-      if (li === importSlots[importSlots.length - 1] && overflow.length > 0) {
+      // Flush any hard overflow after the very last slot
+      if (li === allSlots[allSlots.length - 1] && overflow.length > 0) {
         output.push(...overflow);
       }
     } else {
-      // Not a real import line (comment, blank, etc.) — copy verbatim
+      // Not a use-statement or blank slot — copy verbatim (section headers, etc.)
       output.push(lines[li]);
     }
   }
@@ -1075,9 +1192,6 @@ function buildGroupedImports(
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal: custom group order layout
 // ─────────────────────────────────────────────────────────────────────────────
-
-const STD_ROOTS = new Set(['std', 'core', 'alloc']);
-const LOCAL_ROOTS = new Set(['crate', 'super', 'self']);
 
 /**
  * Assign an import to the first matching entry in importOrder.

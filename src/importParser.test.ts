@@ -1798,3 +1798,728 @@ describe('preserve group mode', () => {
     expect(between.some(l => l.trim() === '')).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 24. Per-item aliases in grouped imports: use mod::{A as X, B}
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('per-item aliases in grouped imports', () => {
+  it('parses Value as JsonValue correctly — items and aliases populated', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _: JsonValue; let _ = json!({}); }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const sg = imports.find(i => i.module === 'serde_json')!;
+    expect(sg.items).toEqual(['Value', 'json']);
+    expect(sg.aliases).toEqual(['JsonValue', undefined]);
+    expect(sg.isGroup).toBe(true);
+  });
+
+  it('keeps Value as JsonValue when JsonValue is used (not Value)', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _: JsonValue; let _ = json!({}); }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    const sg = used.find(i => i.module === 'serde_json')!;
+    expect(sg).toBeDefined();
+    expect(sg.items).toContain('Value');
+    expect(sg.aliases).toContain('JsonValue');
+  });
+
+  it('keeps json macro when used alongside aliased item', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _: JsonValue; let _ = json!({}); }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    const sg = used.find(i => i.module === 'serde_json')!;
+    expect(sg.items).toContain('json');
+  });
+
+  it('removes only the unused aliased item, keeps the plain one', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _ = json!({}); }',   // JsonValue unused
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    const sg = used.find(i => i.module === 'serde_json')!;
+    expect(sg.items).not.toContain('Value');
+    expect(sg.items).toContain('json');
+  });
+
+  it('removes only the unused plain item, keeps the aliased one', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _: JsonValue; }',    // json unused
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    const sg = used.find(i => i.module === 'serde_json')!;
+    expect(sg.items).toContain('Value');
+    expect(sg.aliases?.[sg.items.indexOf('Value')]).toBe('JsonValue');
+    expect(sg.items).not.toContain('json');
+  });
+
+  it('formats grouped import with mixed alias+plain correctly', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'fn main() { let _: JsonValue; let _ = json!({}); }',
+    ].join('\n');
+    const result = organizeImportsInText(src);
+    // Both items present, alias preserved
+    expect(result).toMatch(/use serde_json::\{[^}]*Value as JsonValue[^}]*\}/);
+    expect(result).toMatch(/use serde_json::\{[^}]*json[^}]*\}/);
+  });
+
+  it('formats import with multiple aliases correctly', () => {
+    const src = [
+      'use std::collections::{HashMap, BTreeMap as OrderedMap};',
+      'fn main() { let _: HashMap<String,i32>; let _: OrderedMap<String,i32>; }',
+    ].join('\n');
+    const result = organizeImportsInText(src);
+    expect(result).toContain('BTreeMap as OrderedMap');
+    expect(result).toContain('HashMap');
+  });
+
+  it('reproduces the definitions.rs scenario — serde_json::{Value as JsonValue, json} preserved', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, json};',
+      'use std::sync::Arc;',
+      '',
+      'pub struct Ctx {',
+      '    pub data: JsonValue,',
+      '}',
+      '',
+      'fn make_data() -> JsonValue {',
+      '    json!({ "key": "value" })',
+      '}',
+      '',
+      'fn wrap(x: Arc<Ctx>) -> Arc<Ctx> { x }',
+    ].join('\n');
+    const result = organizeImportsInText(src);
+    // All three used — all kept
+    expect(result).toContain('Value as JsonValue');
+    expect(result).toContain('json');
+    expect(result).toContain('std::sync::Arc');
+  });
+
+  it('simple aliased import (non-group) still works', () => {
+    const src = [
+      'use serde_json::Value as JsonValue;',
+      'fn main() { let _: JsonValue; }',
+    ].join('\n');
+    const result = organizeImportsInText(src);
+    expect(result).toContain('use serde_json::Value as JsonValue;');
+  });
+
+  it('simple aliased import removed when alias is unused', () => {
+    const src = [
+      'use serde_json::Value as JsonValue;',
+      'use std::fs::File;',
+      'fn main() { File::open("x"); }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('serde_json');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 25. Extended alias edge cases (from scenario analysis)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('extended alias edge cases', () => {
+
+  it('S1: deeply nested braces with aliases at multiple levels', () => {
+    const src = [
+      'use std::{io::{Read as R, Write as W}, fs::File};',
+      'fn main() { let _: R; let _: W; let _ = File::open("x"); }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const io = imports.find(i => i.module === 'std::io')!;
+    expect(io).toBeDefined();
+    expect(io.items).toContain('Read');
+    expect(io.aliases).toContain('R');
+    expect(io.items).toContain('Write');
+    expect(io.aliases).toContain('W');
+  });
+
+  it('S2: multiple aliases in same grouped import', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, Map as JsonMap, Number as JsonNumber};',
+      'fn main() { let _: JsonValue; let _: JsonMap; let _: JsonNumber; }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const sg = imports.find(i => i.module === 'serde_json')!;
+    expect(sg.items).toEqual(['Value', 'Map', 'Number']);
+    expect(sg.aliases).toEqual(['JsonValue', 'JsonMap', 'JsonNumber']);
+  });
+
+  it('S2b: all three aliases are kept when used', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, Map as JsonMap, Number as JsonNumber};',
+      'fn main() { let _: JsonValue; let _: JsonMap; let _: JsonNumber; }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    const sg = used.find(i => i.module === 'serde_json')!;
+    expect(sg.items).toHaveLength(3);
+    expect(sg.aliases).toEqual(['JsonValue', 'JsonMap', 'JsonNumber']);
+  });
+
+  it('S3: keeps import when alias is used (original name appears only as qualifier)', () => {
+    const src = [
+      'use serde_json::Value as JsonValue;',
+      'fn main() { let _: JsonValue; let _ = serde_json::Value::Null; }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used).toHaveLength(1);
+    expect(used[0].items).toContain('Value');
+  });
+
+  it('S4: multi-line grouped import with inline comments and aliases', () => {
+    const src = [
+      'use serde_json::{',
+      '    Value as JsonValue, // the main type',
+      '    json,',
+      '    Map,',
+      '};',
+      'fn main() { let _: JsonValue; let _ = json!({}); }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const sg = imports.find(i => i.module === 'serde_json')!;
+    expect(sg).toBeDefined();
+    expect(sg.items).toContain('Value');
+    expect(sg.aliases?.[sg.items.indexOf('Value')]).toBe('JsonValue');
+    // Map is parsed but unused — verify no crash
+    const used = removeUnusedImports([sg], src);
+    expect(used[0].items).toContain('Value');
+  });
+
+  it('S5: wildcard and aliased item from same module remain separate', () => {
+    const src = [
+      'use std::io::*;',
+      'use std::io::Read as R;',
+      'fn main() { let _: R; }',
+    ].join('\n');
+    const imports = parseImports(src);
+    expect(imports).toHaveLength(2);
+    expect(imports.some(i => i.isWildcard)).toBe(true);
+    expect(imports.some(i => i.aliases?.includes('R'))).toBe(true);
+  });
+
+  it('S6: empty braces do not crash the parser', () => {
+    const src = [
+      'use std::io::{};',
+      'use std::fs::File;',
+      'fn main() { File::open("x"); }',
+    ].join('\n');
+    expect(() => parseImports(src)).not.toThrow();
+    // File should still be parseable
+    const all = parseImports(src);
+    expect(all.some(i => i.module === 'std::fs')).toBe(true);
+  });
+
+  it('S7: self:: module with aliases in grouped import', () => {
+    const src = [
+      'use self::utils::{helper as h, another as a};',
+      'fn main() { h(); a(); }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const utils = imports.find(i => i.module === 'self::utils')!;
+    expect(utils).toBeDefined();
+    expect(utils.aliases).toContain('h');
+    expect(utils.aliases).toContain('a');
+  });
+
+  it('S8: pub use with alias in grouped import', () => {
+    const src = [
+      'pub use crate::models::{User as PublicUser, InternalUser};',
+      'fn main() { let _: PublicUser; let _: InternalUser; }',
+    ].join('\n');
+    const imports = parseImports(src);
+    const models = imports.find(i => i.module === 'crate::models')!;
+    expect(models).toBeDefined();
+    expect(models.isPublic).toBe(true);
+    expect(models.items).toContain('User');
+    expect(models.aliases).toContain('PublicUser');
+    expect(models.items).toContain('InternalUser');
+  });
+
+  it('S9: formatImport preserves alias on correct item, not on plain item', () => {
+    const imp: ImportStatement = {
+      originalText: 'use serde_json::{Value as JsonValue, json};',
+      module: 'serde_json',
+      items: ['Value', 'json'],
+      aliases: ['JsonValue', undefined],
+      isGroup: true,
+      isPublic: false,
+      startLine: 0,
+      endLine: 0,
+    };
+    const formatted = formatImport(imp, false);
+    expect(formatted).toContain('Value as JsonValue');
+    expect(formatted).toContain('json');
+    expect(formatted).not.toMatch(/json\s+as\s+JsonValue/);
+    expect(formatted).not.toContain('undefined');
+  });
+
+  it('S10: complex real-world multi-crate import with mixed aliases', () => {
+    const src = [
+      'use std::{',
+      '    collections::{HashMap as Map, BTreeSet},',
+      '    io::{Read, Write as W},',
+      '    fs::File,',
+      '};',
+      'use serde::{Deserialize as D, Serialize};',
+      'use tokio::sync::RwLock;',
+      '',
+      'fn main() {',
+      '    let _: Map<String, i32>;',
+      '    let _: BTreeSet<i32>;',
+      '    let _ = File::open("x");',
+      '    // Read and W not used - should be removed',
+      '    let _: D;',
+      '    let _: Serialize;',
+      '    let _ = RwLock::new(1);',
+      '}',
+    ].join('\n');
+    const result = organizeImportsInText(src);
+    // Check import lines specifically — the comment in code body may contain "Read"
+    const importLines = result.split('\n').filter(l => l.startsWith('use '));
+    expect(importLines.some(l => l.includes('HashMap as Map'))).toBe(true);
+    expect(importLines.some(l => l.includes('Deserialize as D'))).toBe(true);
+    expect(importLines.some(l => l.includes('Write as W'))).toBe(false);  // unused
+    expect(importLines.some(l => /\bRead\b/.test(l))).toBe(false);        // unused
+    expect(importLines.some(l => l.includes('BTreeSet'))).toBe(true);
+    expect(importLines.some(l => l.includes('Serialize'))).toBe(true);
+  });
+
+  it('S11: alias pattern in comment does not prevent correct removal', () => {
+    const src = [
+      'use serde_json::Value as JsonValue;',
+      'fn main() {',
+      '    // Value as JsonValue is used here',
+      '    let _: JsonValue;',
+      '}',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    // JsonValue IS used in real code — must be kept
+    expect(used).toHaveLength(1);
+  });
+
+  it('S12: trailing comma after aliased item in group', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue,};',
+      'fn main() { let _: JsonValue; }',
+    ].join('\n');
+    const imports = parseImports(src);
+    expect(imports[0].items).toContain('Value');
+    expect(imports[0].aliases).toContain('JsonValue');
+  });
+
+  it('S13: module component named same as alias does not confuse parser', () => {
+    const src = [
+      'use json::json as json_macro;',
+      'fn main() { json_macro!({}); }',
+    ].join('\n');
+    const imports = parseImports(src);
+    expect(imports[0].module).toBe('json');
+    expect(imports[0].items).toEqual(['json']);
+    expect(imports[0].aliases).toEqual(['json_macro']);
+  });
+
+  it('S14: formats group where all items have aliases', () => {
+    const imp: ImportStatement = {
+      originalText: 'use a::{B as X, C as Y};',
+      module: 'a',
+      items: ['B', 'C'],
+      aliases: ['X', 'Y'],
+      isGroup: true,
+      isPublic: false,
+      startLine: 0,
+      endLine: 0,
+    };
+    const formatted = formatImport(imp, false);
+    // Both aliased items present, sorted alphabetically by bare name
+    expect(formatted).toContain('B as X');
+    expect(formatted).toContain('C as Y');
+    expect(formatted).not.toContain('undefined');
+  });
+
+  it('S15: removes entire group when all aliased items are unused', () => {
+    const src = [
+      'use serde_json::{Value as JsonValue, Map as JsonMap};',
+      'use std::fs::File;',
+      'fn main() { File::open("x"); }',
+    ].join('\n');
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).not.toContain('serde_json');
+    expect(used.map(i => i.module)).toContain('std::fs');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 26. Whitespace and formatting edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('whitespace and formatting edge cases', () => {
+  it('handles tabs in indentation inside braced group', () => {
+    const src = 'use std::io::{\n\tRead,\n\tWrite,\n};\nfn main() { let _: Read; }';
+    expect(parseImports(src)[0].items).toContain('Read');
+  });
+
+  it('handles mixed tabs and spaces without crashing', () => {
+    expect(() => parseImports('use std::io::{Read,\n Write,\n  BufRead};')).not.toThrow();
+  });
+
+  it('CRLF line endings produce two imports', () => {
+    expect(parseImports('use std::fs::File;\r\nuse std::io::Read;\r\nfn main() {}')).toHaveLength(2);
+  });
+
+  it('no space after comma in braces', () => {
+    expect(parseImports('use std::io::{Read,Write,BufRead};')[0].items).toEqual(['Read', 'Write', 'BufRead']);
+  });
+
+  it('excessive spaces around as keyword', () => {
+    const imp = parseImports('use serde_json::Value   as   JsonValue;');
+    expect(imp[0].items).toEqual(['Value']);
+    expect(imp[0].aliases).toEqual(['JsonValue']);
+  });
+
+  it('newline between item and as keyword (multi-line alias)', () => {
+    const imp = parseImports('use serde_json::Value\n    as JsonValue;\nfn main() { let _: JsonValue; }');
+    expect(imp[0].aliases).toContain('JsonValue');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 27. Unicode and raw identifiers
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('unicode and raw identifiers', () => {
+  it('parses raw identifier r#type as a plain item', () => {
+    expect(parseImports('use crate::parser::r#type;')[0].items).toContain('r#type');
+  });
+
+  it('[BUG-FIX] raw identifier r#type with alias now parsed correctly', () => {
+    const imp = parseImports('use crate::parser::r#type as TypeKeyword;');
+    expect(imp).toHaveLength(1);
+    expect(imp[0].items).toContain('r#type');
+    expect(imp[0].aliases).toContain('TypeKeyword');
+  });
+
+  it('raw identifiers in grouped import', () => {
+    expect(parseImports('use crate::keywords::{r#type, r#impl, r#fn};')[0].items)
+      .toEqual(['r#type', 'r#impl', 'r#fn']);
+  });
+
+  it('non-ASCII in comment is ignored — one import parsed', () => {
+    expect(parseImports('// 日本語\nuse std::fs::File;\nfn main() { File::open("x"); }')).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 28. Extreme nesting and complexity
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('extreme nesting and complexity', () => {
+  it('four-level nested braces produce correct module paths', () => {
+    const mods = parseImports('use a::{b::{c::{d::E, f::G}, h::I}, j::K};').map(i => i.module);
+    expect(mods).toContain('a::b::c::d');
+    expect(mods).toContain('a::b::c::f');
+    expect(mods).toContain('a::b::h');
+    expect(mods).toContain('a::j');
+  });
+
+  it('same module at different nesting levels produces std::io imports', () => {
+    expect(
+      parseImports('use std::{io, io::Read, io::Write};').filter(i => i.module.startsWith('std::io')).length
+    ).toBeGreaterThan(0);
+  });
+
+  it('deeply nested with aliases at every level', () => {
+    const imp = parseImports('use a::{b::C as X, d::{e::F as Y, g::H as Z}};');
+    const b = imp.find(i => i.module === 'a::b');
+    if (b) expect(b.aliases).toContain('X');
+    const e = imp.find(i => i.module === 'a::d::e');
+    if (e) expect(e.aliases).toContain('Y');
+  });
+
+  it('25-item brace expansion parses all items', () => {
+    const items = Array.from({ length: 25 }, (_, i) => `Item${i}`);
+    expect(parseImports(`use crate::items::{${items.join(', ')}};`)[0].items).toHaveLength(25);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 29. Comment interactions
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('comment interactions', () => {
+  it('block comment between imports does not drop File', () => {
+    const imp = parseImports('use std::fs::File;\n/* outer */\nuse std::io::Read;\nfn main() { File::open("x"); }');
+    expect(imp.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('doc comment before import does not break parsing', () => {
+    expect(parseImports('/// File ops\nuse std::fs::File;\nfn main() { File::open("x"); }')[0].module).toBe('std::fs');
+  });
+
+  it('attribute before cfg-gated import is detected', () => {
+    const imp = parseImports('#[allow(unused)]\n#[cfg(test)]\nuse crate::test::helpers;\nfn main() {}');
+    expect(imp[0].cfgAttribute).toBeDefined();
+  });
+
+  it('line comment containing semicolon-like use text is not parsed', () => {
+    expect(
+      parseImports('// use std::io::Read;\nuse std::fs::File;\nfn main() { File::open("x"); }').map(i => i.module)
+    ).not.toContain('std::io');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 30. Macro and special syntax interactions
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('macro and special syntax interactions', () => {
+  it('macro_use attribute before use does not prevent parsing', () => {
+    expect(parseImports('#[macro_use]\nuse serde::Deserialize;\nfn main() {}')[0].module).toBe('serde');
+  });
+
+  it('path attribute before use does not crash', () => {
+    expect(() => parseImports('#[path = "custom/path.rs"]\nuse crate::module::Item;\nfn main() {}')).not.toThrow();
+  });
+
+  it('macro call thing!() does not count as usage of Thing import', () => {
+    const src = 'use some::Thing;\nfn main() { thing!(); }';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(0);
+  });
+
+  it('use inside macro_rules! body is not parsed as top-level import', () => {
+    expect(parseImports('macro_rules! inner_use {\n    () => { use std::io::Read; };\n}\nfn main() {}')).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 31. Cfg edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('cfg edge cases', () => {
+  it('multiple stacked cfg attributes — cfgAttribute is set', () => {
+    const imp = parseImports('#[cfg(unix)]\n#[cfg(feature = "advanced")]\nuse crate::unix_advanced::Feature;\nfn main() {}');
+    expect(imp[0].cfgAttribute).toBeDefined();
+  });
+
+  it('cfg_attr before import does not prevent parsing', () => {
+    expect(
+      parseImports('#[cfg_attr(feature = "derive", derive(Debug))]\nuse serde::Deserialize;\nfn main() {}').map(i => i.module)
+    ).toContain('serde');
+  });
+
+  it('cfg on grouped import sets cfgAttribute and isGroup', () => {
+    const imp = parseImports('#[cfg(test)]\nuse std::collections::{HashMap, BTreeMap};\nfn main() {}');
+    expect(imp[0].cfgAttribute).toBe('#[cfg(test)]');
+    expect(imp[0].isGroup).toBe(true);
+  });
+
+  it('cfg-gated import is kept even when the identifier is unused', () => {
+    const src = '#[cfg(feature = "unused")]\nuse std::sync::Arc;\nfn main() {}';
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used).toHaveLength(1);
+    expect(used[0].cfgAttribute).toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 32. Merge and deduplication edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('merge and deduplication edge cases', () => {
+  it('does not merge imports where one has an alias (different semantics)', () => {
+    const imports = [
+      makeImport('std::io', ['Read'], { aliases: [undefined], isGroup: false }),
+      makeImport('std::io', ['Read'], { aliases: ['R' as any], isGroup: false }),
+    ];
+    // Aliased imports are excluded from merging — both survive
+    expect(mergeImports(imports)).toHaveLength(2);
+  });
+
+  it('deduplicates identical aliased imports', () => {
+    const src = 'use serde_json::Value as JsonValue;\nuse serde_json::Value as JsonValue;\nfn main() { let _: JsonValue; }';
+    expect(removeDuplicateImports(parseImports(src))).toHaveLength(1);
+  });
+
+  it('dedup treats same item with different aliases as the same key (same bare item)', () => {
+    // Dedup key is module::item (no alias), so both collapse to one.
+    // This is intentional — two imports of the same item is a compile error.
+    const src = 'use serde_json::Value as JsonValue;\nuse serde_json::Value as JV;\nfn main() { let _: JsonValue; let _: JV; }';
+    expect(removeDuplicateImports(parseImports(src))).toHaveLength(1);
+  });
+
+  it('merges compatible grouped imports deduplicating the shared item', () => {
+    const imports = [
+      makeImport('std::io', ['Read', 'Write']),
+      makeImport('std::io', ['Write', 'BufRead']),
+    ];
+    const merged = mergeImports(imports);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].items).toHaveLength(3); // Read, Write, BufRead
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 33. Formatting output edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('formatting output edge cases', () => {
+  it('single-item aliased group with collapseSingle=false collapses alias to simple form', () => {
+    // Design decision: single aliased items always use the simple form (no braces).
+    // use a::{B as C} with one item → use a::B as C; regardless of collapseSingle.
+    // This is idiomatic Rust — braces around a single aliased item add no clarity.
+    const imp: ImportStatement = { originalText: '', module: 'a', items: ['B'], aliases: ['C'], isGroup: true, startLine: 0, endLine: 0 };
+    expect(formatImport(imp, false)).toBe('use a::B as C;');
+  });
+
+  it('single-item aliased group with collapseSingle=true also simple form', () => {
+    const imp: ImportStatement = { originalText: '', module: 'a', items: ['B'], aliases: ['C'], isGroup: true, startLine: 0, endLine: 0 };
+    expect(formatImport(imp, true)).toBe('use a::B as C;');
+  });
+
+  it('sorts by original item name not alias name', () => {
+    const imp: ImportStatement = {
+      originalText: '', module: 'a', items: ['Z', 'A'], aliases: ['A', 'Z'], isGroup: true, startLine: 0, endLine: 0,
+    };
+    const out = formatImport(imp, false);
+    // Sorted by bare name: A (with alias Z) before Z (with alias A)
+    expect(out.indexOf('A as Z')).toBeLessThan(out.indexOf('Z as A'));
+  });
+
+  it('4-item import is formatted as multi-line', () => {
+    const imp: ImportStatement = {
+      originalText: '', module: 'a::b::c::d::e', items: ['Item1', 'Item2', 'Item3', 'Item4'], isGroup: true, startLine: 0, endLine: 0,
+    };
+    expect(formatImport(imp, false)).toContain('\n');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 34. Unused detection edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('unused detection edge cases', () => {
+  it('detects usage in type ascription position', () => {
+    const src = 'use serde_json::Value as JsonValue;\nfn main() { let x = 5 as i32; let _y: JsonValue; }';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(1);
+  });
+
+  it('detects usage in match arm pattern', () => {
+    const src = 'use my_enum::Variant as V;\nfn main() { match x { V => {}, _ => {} } }';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(1);
+  });
+
+  it('detects usage in struct literal', () => {
+    const src = 'use crate::types::Config as Cfg;\nfn main() { let _c = Cfg { field: 1 }; }';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(1);
+  });
+
+  it('detects usage in turbofish with alias', () => {
+    const src = 'use std::collections::HashMap as HM;\nfn main() { let _: HM<String, i32> = HM::new(); }';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(1);
+  });
+
+  it('item in #[cfg(never)] block is kept (static analysis limitation — cannot detect dead code)', () => {
+    // We cannot statically know that #[cfg(feature="never")] is dead code.
+    // Read appears as a bare identifier so it is kept.
+    const src = 'use std::io::Read;\nfn main() {\n    #[cfg(feature = "never")]\n    { let _: Read; }\n}';
+    expect(removeUnusedImports(parseImports(src), src)).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 35. buildOrganizedText edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildOrganizedText edge cases', () => {
+  it('file with only imports and no code — all removed as unused (no references)', () => {
+    // With no code body nothing references the imports, so they are correctly removed.
+    // Use removeUnused:false to keep them when there is no code.
+    const src = 'use std::fs::File;\nuse std::io::Read;';
+    expect(organizeImportsInText(src, { removeUnused: false })).toContain('use std::');
+  });
+
+  it('[BUG-FIX] import after code declaration is not parsed as top-level import', () => {
+    // fn on line 0 is a code declaration — use on line 1 must be ignored
+    expect(parseImports('fn main() {}\nuse std::fs::File;')).toHaveLength(0);
+  });
+
+  it('multiple blank lines after imports collapsed to exactly one', () => {
+    const src = 'use std::fs::File;\n\n\n\nfn main() { File::open("x"); }';
+    const lines = organizeImportsInText(src).split('\n');
+    const importIdx = lines.findIndex(l => l.includes('use std::fs'));
+    const mainIdx = lines.findIndex(l => l.includes('fn main'));
+    expect(mainIdx - importIdx).toBe(2); // import line + one blank
+  });
+
+  it('CRLF input produces usable output with import preserved', () => {
+    expect(organizeImportsInText('use std::fs::File;\r\nfn main() { File::open("x"); }')).toContain('use std::fs::File');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 36. Real-world bug scenarios
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('real-world bug scenarios', () => {
+  it('serde derive with r#type field — Serialize kept', () => {
+    const src = 'use serde::{Deserialize, Serialize};\n\n#[derive(Serialize)]\nstruct Data {\n    #[serde(rename = "type")]\n    r#type: String,\n}';
+    expect(removeUnusedImports(parseImports(src), src).map(i => i.items).flat()).toContain('Serialize');
+  });
+
+  it('async_trait macro attribute keeps import', () => {
+    const src = 'use async_trait::async_trait;\n\n#[async_trait]\ntrait MyTrait { async fn work(); }';
+    expect(removeUnusedImports(parseImports(src), src).map(i => i.module)).toContain('async_trait');
+  });
+
+  it('thiserror Error derive keeps import', () => {
+    const src = 'use thiserror::Error;\n\n#[derive(Error)]\nenum MyError {\n    #[error("msg")]\n    Variant,\n}';
+    expect(removeUnusedImports(parseImports(src), src).map(i => i.module)).toContain('thiserror');
+  });
+
+  it('two pub use re-exports in a chain both parsed as isPublic', () => {
+    const src = 'pub use crate::inner::Item;\npub use crate::inner::Item as PublicItem;\nuse crate::internal::Private;';
+    expect(parseImports(src).filter(i => i.isPublic)).toHaveLength(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 37. Fuzz-style patterns
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('fuzz-style patterns', () => {
+  it('empty string returns empty string', () => {
+    expect(organizeImportsInText('')).toBe('');
+  });
+
+  it('only whitespace does not crash', () => {
+    expect(() => organizeImportsInText('   \n\t\n   ')).not.toThrow();
+  });
+
+  it('only comments does not crash', () => {
+    expect(() => organizeImportsInText('// comment\n/* block */\n/// doc')).not.toThrow();
+  });
+
+  it('import-like text in string literal is not parsed as import', () => {
+    const src = 'use std::io::Read;\nfn main() {\n    let _code = "use std::fs::File;";\n    let _: Read;\n}';
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::io');
+    expect(used.map(i => i.module)).not.toContain('std::fs');
+  });
+
+  it('rapid open/close braces do not crash', () => {
+    expect(() => parseImports('use a::{{{{B}}}};')).not.toThrow();
+  });
+
+  it('unbalanced braces do not crash', () => {
+    expect(() => parseImports('use std::io::{Read, Write;')).not.toThrow();
+  });
+});

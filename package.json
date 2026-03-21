@@ -19,8 +19,16 @@
   "main": "./out/extension.js",
   "scripts": {
     "test": "jest",
+    "test:watch": "jest --watch",
+    "test:ci": "jest --ci --forceExit",
+    "fixtures:update": "UPDATE_FIXTURES=true jest --testPathPattern=fixture",
+    "compile": "tsc -p ./",
     "build": "tsc",
-    "compile": "tsc -p ./"
+    "test:integration": "bash scripts/integration-test.sh",
+    "test:integration:fast": "bash scripts/integration-test.sh --no-cargo",
+    "package": "npm run compile && vsce package --no-dependencies",
+    "publish:marketplace": "npm run compile && vsce publish --no-dependencies",
+    "release": "node scripts/release.js"
   },
   "contributes": {
     "commands": [

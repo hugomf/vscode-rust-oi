@@ -1,0 +1,206 @@
+name: CI / CD
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+#
+#   push to main/master/develop  →  CI only (test + build, no publish)
+#   pull_request                 →  CI only
+#   push a version tag v*.*.*    →  CI + package + publish to Marketplace
+#   workflow_dispatch            →  manual run; set publish=true to publish
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, master, develop]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to VS Code Marketplace?"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 1 — Unit + snapshot tests (Layer 1 + 2)
+  # ───────────────────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit & snapshot tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --ci --forceExit
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2 — Integration tests: CLI + cargo check
+  # ───────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration + cargo check
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-test/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-test/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests
+        run: bash scripts/integration-test.sh
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 3 — Build & package the .vsix
+  #
+  # Runs on every push/PR. The .vsix is uploaded as a build artifact so you
+  # can download it from the Actions run page and install locally with:
+  #   code --install-extension rust-import-organizer-x.y.z.vsix
+  # ───────────────────────────────────────────────────────────────────────────
+  package:
+    name: Build & package .vsix
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration]
+
+    outputs:
+      vsix-name: ${{ steps.pack.outputs.vsix-name }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Package extension
+        id: pack
+        run: |
+          vsce package --no-dependencies
+          VSIX=$(ls *.vsix)
+          echo "vsix-name=$VSIX" >> "$GITHUB_OUTPUT"
+          echo "Packaged: $VSIX"
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ steps.version.outputs.version }}
+          path: "*.vsix"
+          retention-days: 30
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 4 — Publish to VS Code Marketplace
+  #
+  # Only triggers when:
+  #   - A version tag  v1.2.3  is pushed, OR
+  #   - workflow_dispatch with publish=true
+  #
+  # Requires VSCE_PAT secret in repo Settings → Secrets → Actions.
+  # Get the token at: https://dev.azure.com → User settings → Personal access tokens
+  #   Scope: Marketplace → Manage
+  # ───────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to Marketplace
+    runs-on: ubuntu-latest
+    needs: package
+    environment: marketplace
+
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Error: tag v$TAG does not match package.json version $PKG"
+            echo "Bump package.json to $TAG before pushing the tag."
+            exit 1
+          fi
+          echo "Tag v$TAG matches package.json — OK"
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: vsce publish --no-dependencies -p "$VSCE_PAT"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.vsix"
+          generate_release_notes: true
+          body: |
+            Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=hugomartinezf.rust-import-organizer)
+
+            Or install the `.vsix` directly:
+            ```
+            code --install-extension rust-import-organizer-${{ needs.package.outputs.version }}.vsix
+            ```

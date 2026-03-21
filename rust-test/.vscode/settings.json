@@ -1,0 +1,10 @@
+{
+    "[rust]": {
+        "editor.formatOnSave": false,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "never"
+        }
+    },
+    "rust-analyzer.checkOnSave": true,
+    "rust-analyzer.cargo.features": "all"
+}

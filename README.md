@@ -278,73 +278,9 @@ If a `pub use` or `#[cfg]-guarded use` statement appears after the main import b
 
 ## Development
 
-### Prerequisites
+For detailed development instructions, testing procedures, and contribution guidelines, see [DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 
-- Node.js v16 or higher
-- npm
-
-### Setup
-
-```bash
-git clone https://github.com/hugomf/vscode-rust-oi.git
-cd vscode-rust-oi
-npm install
-```
-
-### Build
-
-```bash
-npm run compile
-```
-
-### Test
-
-```bash
-npm test
-```
-
-The test suite has 330 tests across six files:
-
-| File | Tests | What it covers |
-|------|-------|---------------|
-| `importParser.test.ts` | ~169 | Parsing, categorization, sorting, merging, formatting, unused removal, cfg imports, Cargo classification, comment preservation, custom groups, pub use placement, preserve mode |
-| `extension.test.ts` | ~55 | All configuration settings, organize-on-save pipeline, range-fix regression, bug regressions |
-| `autoImport.test.ts` | 22 | Diagnostic scanning, candidate fetching, single-match auto-apply, multi-match disambiguation |
-| `cargoParser.test.ts` | 30 | Cargo.toml parsing, workspace member extraction, dep normalisation, `classifyWithCargo` |
-| `cargoWorkspace.test.ts` | 10 | VS Code filesystem adapter, Cargo.toml discovery |
-| `stress_test.test.ts` | 45 | Edge cases: raw identifiers, nested braces, CRLF, shebang, 50-import files, real-world patterns |
-
-### Running locally
-
-1. Open the project in VS Code
-2. Press `F5` to launch an Extension Development Host window
-3. Open any `.rs` file and run **Organize Rust Imports** from the Command Palette or right-click menu
-
-## Architecture
-
-```
-extension.ts         VS Code adapter — commands, keybindings, Code Actions, on-save hook
-autoImport.ts        Rust Analyzer integration — diagnostic scanning, candidate fetching, QuickPick
-importParser.ts      All parsing and transformation logic — no VS Code dependency, fully testable
-cargoParser.ts       Cargo.toml parser — pure TypeScript, no VS Code dependency
-cargoWorkspace.ts    VS Code adapter for cargoParser — reads Cargo.toml via the filesystem API
-```
-
-### `importParser.ts` public API
-
-| Export | Purpose |
-|--------|---------|
-| `organizeImportsInText(text, options)` | Main entry point — runs the full pipeline and returns the transformed source |
-| `buildOrganizedText(used, all, text, options)` | Rebuilds source text using `all` for range calculation |
-| `parseImports(text)` | Parses all `use` statements from a Rust source string |
-| `removeUnusedImports(imports, text)` | Filters to only imports referenced in the code |
-| `removeDuplicateImports(imports)` | Removes exact duplicates |
-| `mergeImports(imports)` | Combines separate same-module imports into a single grouped import |
-| `organizeImports(imports, externalCrates?, localCrates?, pubUsePlacement?)` | Splits into std / external / local / pubUse / cfg buckets |
-| `sortImports(imports)` | Sorts by module path |
-| `formatImport(imp, collapseSingle)` | Formats a single import statement as a string |
-| `categorizeImport(module, externalCrates?, localCrates?)` | Returns `'std'`, `'external'`, or `'local'` |
-| `findMidFilePubUse(text)` | Finds `pub use` statements outside the top-level import block |
+For quick reference and common tasks, see [QUICKSTART.md](./docs/QUICKSTART.md).
 
 ## License
 
