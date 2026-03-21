@@ -130,7 +130,7 @@ jobs:
           echo "Packaged: $VSIX"
 
       - name: Upload .vsix artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: vsix-${{ steps.version.outputs.version }}
           path: "*.vsix"
