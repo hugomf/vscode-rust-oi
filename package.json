@@ -5,7 +5,7 @@
   "publisher": "hugomartinezf",
   "icon": "icon.png",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -101,7 +101,7 @@
         "rust-import-organizer.collapseSingleImports": {
           "type": "boolean",
           "default": false,
-          "description": "Collapse grouped imports filtered to a single item (e.g. use std::path::{Path} \u2192 use std::path::Path)."
+          "description": "Collapse grouped imports filtered to a single item (e.g. use std::path::{Path} → use std::path::Path)."
         },
         "rust-import-organizer.removeUnused": {
           "type": "boolean",
