@@ -2,6 +2,25 @@
 
 All notable changes to the "rust-import-organizer" extension are documented in this file.
 
+## [0.2.8] - 2026-03-23
+
+### Added
+
+**Pattern-based trait detection**
+- Added automatic trait detection based on method call patterns
+- Now detects when `TraitName` is needed by checking for `trait_name()` method calls
+- Converts PascalCase to snake_case automatically (e.g., `IntoResponse` → `into_response`)
+- Works for: `IntoResponse`, `AsRef`, `ToString`, `Default`, `From`, `Into`, and any trait with a callable method
+
+**Axum support**
+- `IntoResponse` trait is now automatically kept when `.into_response()` is called
+- `Json` and `Response` imports are correctly preserved in Axum handlers
+
+**Test fixtures**
+- Added new test fixtures (`other.rs`, `other.expected.rs`) for additional coverage
+
+---
+
 ## [0.2.7] - 2026-03-21
 
 ### Added

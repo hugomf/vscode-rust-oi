@@ -2489,6 +2489,25 @@ describe('real-world bug scenarios', () => {
     const src = 'pub use crate::inner::Item;\npub use crate::inner::Item as PublicItem;\nuse crate::internal::Private;';
     expect(parseImports(src).filter(i => i.isPublic)).toHaveLength(2);
   });
+
+  it('[axum] keeps IntoResponse when .into_response() is called', () => {
+    const src = `use axum::{Json as ResponseJson, Response, IntoResponse};
+  use axum::extract::State;
+  use axum::http::StatusCode;
+
+  fn handler(State(_): State<()>) -> Response {
+      let body = ResponseJson("ok");
+      (StatusCode::OK, body).into_response()
+  }`;
+
+    const used = removeUnusedImports(parseImports(src), src);
+    const axumImport = used.find(i => i.module === 'axum');
+    expect(axumImport).toBeDefined();
+    expect(axumImport!.items).toContain('IntoResponse');
+    expect(axumImport!.items).toContain('Json');
+    expect(axumImport!.items).toContain('Response');
+  });
+
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

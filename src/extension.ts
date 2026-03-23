@@ -63,11 +63,8 @@ async function getOrganizeOptions(
   document: vscode.TextDocument
 ): Promise<Parameters<typeof organizeImportsInText>[1]> {
   const config = vscode.workspace.getConfiguration('rust-import-organizer');
-
-  // Load Cargo.toml for accurate crate classification
   const cargo = await loadCargoWorkspace(document.uri);
 
-  // groupImports can be boolean, "preserve", or "custom"
   const groupImportsSetting = config.get<boolean | string>('groupImports', true);
 
   return {
@@ -77,7 +74,7 @@ async function getOrganizeOptions(
     sortAlphabetically: config.get<boolean>('sortAlphabetically', true),
     blankLineBetweenGroups: config.get<boolean>('blankLineBetweenGroups', true),
     collapseSingleImports: config.get<boolean>('collapseSingleImports', false),
-    removeUnused: config.get<boolean>('removeUnused', true),
+    removeUnused: true,
     knownExternalCrates: cargo.externalCrates,
     knownLocalCrates: cargo.workspaceMembers,
   };
@@ -94,43 +91,70 @@ async function runOrganizeCommand(withAutoImport: boolean): Promise<void> {
     return;
   }
 
+  const document = editor.document;
+  const originalText = document.getText();
+
   const config = vscode.workspace.getConfiguration('rust-import-organizer');
   const enableAutoImport = config.get<boolean>('enableAutoImport', true);
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Rust Import Organizer', cancellable: false },
     async progress => {
+
+      // -------------------------------
+      // AUTO IMPORT
+      // -------------------------------
       if (withAutoImport && enableAutoImport) {
         progress.report({ message: 'Adding missing imports...' });
-        const autoResult = await runAutoImport(editor.document, progress);
+        const autoResult = await runAutoImport(document, progress);
         if (autoResult.added.length > 0) await delay(300);
         reportAutoImportSummary(autoResult);
       }
 
       progress.report({ message: 'Organizing imports...' });
-      try {
-        const text = editor.document.getText();
-        const options = await getOrganizeOptions(editor.document);
-        const newText = organizeImportsInText(text, options);
 
-        if (newText !== text) {
+      try {
+        // 🧠 Let rust-analyzer refresh diagnostics
+        await delay(150);
+
+        // -------------------------------
+        // STEP 1: APPLY UNUSED IMPORT FIXES (SAFE)
+        // -------------------------------
+        const unusedEdits = getUnusedImportEdits(document);
+
+        if (unusedEdits.length > 0) {
+          const edit = new vscode.WorkspaceEdit();
+          edit.set(document.uri, unusedEdits);
+          await vscode.workspace.applyEdit(edit);
+        }
+
+        // -------------------------------
+        // STEP 2: RUN YOUR ORGANIZER
+        // -------------------------------
+        const updatedText = document.getText();
+        const options = await getOrganizeOptions(document);
+
+        const newText = organizeImportsInText(updatedText, options);
+
+        if (newText !== updatedText) {
           const fullRange = new vscode.Range(
-            editor.document.positionAt(0),
-            editor.document.positionAt(text.length)
+            document.positionAt(0),
+            document.positionAt(updatedText.length)
           );
           await editor.edit(editBuilder => editBuilder.replace(fullRange, newText));
         }
 
-        // Warn about any pub use statements that appear after the import block —
-        // these are invisible to the organizer and may be unintentional re-exports.
-        const midFile = findMidFilePubUse(text);
+        // -------------------------------
+        // WARN ABOUT MID-FILE PUB USE
+        // -------------------------------
+        const midFile = findMidFilePubUse(updatedText);
         if (midFile.length > 0) {
           const lines = midFile.map(m => `line ${m.line + 1}`).join(', ');
-          const msg = midFile.length === 1
-            ? `Found a mid-file pub use on ${lines} — it cannot be organized automatically. Remove it manually if unused.`
-            : `Found ${midFile.length} mid-file pub use statements (${lines}) — they cannot be organized automatically.`;
-          vscode.window.showWarningMessage(msg);
+          vscode.window.showWarningMessage(
+            `Found ${midFile.length} mid-file pub use (${lines}) — cannot auto-organize.`
+          );
         }
+
       } catch (error) {
         vscode.window.showErrorMessage(`Error organizing imports: ${error}`);
       }
@@ -138,20 +162,42 @@ async function runOrganizeCommand(withAutoImport: boolean): Promise<void> {
   );
 }
 
+// ✅ THIS is the correct way (no string slicing)
+function getUnusedImportEdits(document: vscode.TextDocument): vscode.TextEdit[] {
+  const diagnostics = vscode.languages.getDiagnostics(document.uri);
+
+  return diagnostics
+    .filter(d =>
+      d.source === 'rust-analyzer' &&
+      (
+        d.code === 'unused_imports' ||
+        (typeof d.message === 'string' &&
+          d.message.toLowerCase().includes('unused import'))
+      )
+    )
+    .map(d => vscode.TextEdit.delete(d.range));
+}
+
 async function buildOrganizeEdit(document: vscode.TextDocument): Promise<vscode.TextEdit[]> {
-  const text = document.getText();
   const options = await getOrganizeOptions(document);
+  const text = document.getText();
   const newText = organizeImportsInText(text, options);
+
   if (newText === text) return [];
-  const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(text.length));
+
+  const fullRange = new vscode.Range(
+    document.positionAt(0),
+    document.positionAt(text.length)
+  );
+
   return [vscode.TextEdit.replace(fullRange, newText)];
 }
 
 function reportAutoImportSummary(result: { added: string[]; skipped: string[]; failed: string[] }) {
   const parts: string[] = [];
-  if (result.added.length > 0) parts.push(`Added ${result.added.length} import${result.added.length > 1 ? 's' : ''}`);
-  if (result.skipped.length > 0) parts.push(`Skipped ${result.skipped.length} (dismissed)`);
-  if (result.failed.length > 0) parts.push(`${result.failed.length} unresolved (no suggestions)`);
+  if (result.added.length > 0) parts.push(`Added ${result.added.length}`);
+  if (result.skipped.length > 0) parts.push(`Skipped ${result.skipped.length}`);
+  if (result.failed.length > 0) parts.push(`${result.failed.length} unresolved`);
   if (parts.length > 0) vscode.window.showInformationMessage(`Auto-import: ${parts.join(', ')}`);
 }
 

@@ -276,6 +276,24 @@ use std::io::{Read, Write};
 
 If a `pub use` or `#[cfg]-guarded use` statement appears after the main import block (e.g. a re-export accidentally placed at the bottom of a file), the extension cannot remove it automatically — it may be inside a `mod` block or otherwise intentional. Instead it shows a warning notification with the line number so you can review it manually.
 
+## Limitations
+
+### Trait method detection
+
+The extension uses pattern-based detection to keep trait imports needed for method dispatch. It converts PascalCase trait names to snake_case method names (e.g., `IntoResponse` → `into_response()`). This approach has known limitations:
+
+- **Naming convention dependency** — The detection only works when the trait name directly maps to the method name. Traits like `IntoResponse` → `.into_response()` work, but traits with non-standard names (e.g., `FromStr` → `.parse()`) are not automatically detected.
+
+- **Method name collisions** — Common method names like `.to_string()`, `.into()`, `.from()` may match multiple traits. The extension conservatively keeps imports in these cases to avoid false removals.
+
+- **Generic trait bounds** — Traits used only as generic bounds (e.g., `T: Into<String>`) where the trait name never appears explicitly in code cannot be detected.
+
+- **Operator traits** — Traits like `Add`, `Sub`, `Mul` (used via operator overloading `a + b`) are not detected.
+
+- **Future-proofing** — The extension may not detect traits added in newer Rust editions or third-party crates that don't follow conventional naming.
+
+If you encounter a case where a needed trait import is incorrectly removed, please [open an issue](https://github.com/hugomf/vscode-rust-oi/issues). You can also set `"rust-import-organizer.removeUnused": false` in your settings to disable unused import removal entirely while the team works on a fix.
+
 ## Development
 
 For detailed development instructions, testing procedures, and contribution guidelines, see [DEVELOPMENT.md](./docs/DEVELOPMENT.md).

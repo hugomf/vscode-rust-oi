@@ -780,6 +780,30 @@ export function removeUnusedImports(
     implicitlyUsedTraits.add('Seek');
   }
 
+  // ── 4b. Pattern-based trait detection (TraitName → trait_name()) 
+  // Catches IntoResponse, AsRef, ToString, Default, From, etc. automatically
+  const methodCallRegex = /\.(\w+)\s*\(/g;
+  const methodCalls = new Set<string>();
+  let methodMatch: RegExpExecArray | null;
+  while ((methodMatch = methodCallRegex.exec(codeForIdScan)) !== null) {
+    methodCalls.add(methodMatch[1]);
+  }
+
+  // PascalCase to snake_case: IntoResponse → into_response
+  const toSnakeCase = (s: string) => s
+    .replace(/([A-Z])/g, '_$1')
+    .toLowerCase()
+    .replace(/^_/, '');
+
+  // Check if any imported item matches a called method pattern
+  for (const imp of imports) {
+    for (const item of imp.items) {
+      if (methodCalls.has(toSnakeCase(item))) {
+        implicitlyUsedTraits.add(item);
+      }
+    }
+  }
+
   // ── 5. Filter each import ─────────────────────────────────────────────────
   const result: ImportStatement[] = [];
 
