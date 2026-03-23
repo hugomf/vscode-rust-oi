@@ -7,3 +7,12 @@ src/**
 **/*.map
 **/*.ts
 **/node_modules/**
+**/rust-test/**
+**/fixtures/**
+**/scripts/**
+**/docs/DEVELOPMENT.md
+**/jest.config.js
+.git/**
+LICENSE.md
+README.md
+CHANGELOG.md
