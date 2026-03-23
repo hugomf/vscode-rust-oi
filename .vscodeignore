@@ -13,6 +13,5 @@ src/**
 **/docs/DEVELOPMENT.md
 **/jest.config.js
 .git/**
-LICENSE.md
 README.md
 CHANGELOG.md
