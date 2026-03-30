@@ -26,7 +26,7 @@ use std::sync::Arc;
 use axum::{Json};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode};
-use axum::response::{IntoResponse, Json as ResponseJson, Response};
+use axum::response::{Json as ResponseJson, Response};
 use flowforge_runtime::types::{
     ApiError,
     ConfigFieldSchema,
