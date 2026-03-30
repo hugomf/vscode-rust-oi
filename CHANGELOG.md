@@ -2,7 +2,7 @@
 
 All notable changes to the "rust-import-organizer" extension are documented in this file.
 
-## [0.2.9] - 2026-03-30
+## [0.3.0] - 2026-03-30
 
 ### Added
 
