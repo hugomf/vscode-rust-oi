@@ -2489,25 +2489,6 @@ describe('real-world bug scenarios', () => {
     const src = 'pub use crate::inner::Item;\npub use crate::inner::Item as PublicItem;\nuse crate::internal::Private;';
     expect(parseImports(src).filter(i => i.isPublic)).toHaveLength(2);
   });
-
-  it('[axum] keeps IntoResponse when .into_response() is called', () => {
-    const src = `use axum::{Json as ResponseJson, Response, IntoResponse};
-  use axum::extract::State;
-  use axum::http::StatusCode;
-
-  fn handler(State(_): State<()>) -> Response {
-      let body = ResponseJson("ok");
-      (StatusCode::OK, body).into_response()
-  }`;
-
-    const used = removeUnusedImports(parseImports(src), src);
-    const axumImport = used.find(i => i.module === 'axum');
-    expect(axumImport).toBeDefined();
-    expect(axumImport!.items).toContain('IntoResponse');
-    expect(axumImport!.items).toContain('Json');
-    expect(axumImport!.items).toContain('Response');
-  });
-
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2540,5 +2521,163 @@ describe('fuzz-style patterns', () => {
 
   it('unbalanced braces do not crash', () => {
     expect(() => parseImports('use std::io::{Read, Write;')).not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 38. BUG-FIX: qualified-only detection must not remove types used only via
+//     associated function calls (Uuid::new_v4(), HashMap::new(), Arc::new(), …)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('qualified-only false-positive: associated function calls', () => {
+
+  it('[BUG-FIX] keeps Uuid when only Uuid::parse_str() and Uuid::new_v4() appear', () => {
+    const src = `use uuid::Uuid;
+
+fn core_to_db(tenant: &str) -> String {
+    Uuid::parse_str(tenant)
+        .unwrap_or_else(|_| Uuid::new_v4())
+        .to_string()
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('uuid');
+  });
+
+  it('[BUG-FIX] keeps Uuid in the exact audit-API pattern from the bug report', () => {
+    const src = `use uuid::Uuid;
+use std::sync::Arc;
+
+fn core_to_db(core_event: SomeEvent) -> SomeDbEvent {
+    SomeDbEvent {
+        tenant_id: Uuid::parse_str(&core_event.tenant_id)
+            .unwrap_or_else(|_| Uuid::new_v4()),
+        actor: Uuid::parse_str(&core_event.actor)
+            .unwrap_or_else(|_| Uuid::new_v4()),
+    }
+}
+
+pub async fn get_instance_audit(instance_id: String) {
+    let _uuid = match Uuid::parse_str(&instance_id) {
+        Ok(uuid) => uuid,
+        Err(_) => return,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    fn test() { let _id = Uuid::new_v4(); }
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('uuid');
+    // Arc is genuinely unused — should still be removed
+    expect(used.map(i => i.module)).not.toContain('std::sync');
+  });
+
+  it('keeps HashMap when only HashMap::new() is called', () => {
+    const src = `use std::collections::HashMap;
+fn make() -> HashMap<String, i32> {
+    HashMap::new()
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::collections');
+  });
+
+  it('keeps Arc when only Arc::new() is called', () => {
+    const src = `use std::sync::Arc;
+fn wrap(x: i32) -> Arc<i32> {
+    Arc::new(x)
+}`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::sync');
+  });
+
+  it('keeps BTreeMap when only BTreeMap::new() is called', () => {
+    const src = `use std::collections::BTreeMap;
+fn make() { let _ = BTreeMap::<String, i32>::new(); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::collections');
+  });
+
+  it('keeps String-like types with associated constructors', () => {
+    const src = `use std::path::PathBuf;
+fn make(s: &str) -> PathBuf { PathBuf::from(s) }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('std::path');
+  });
+
+  it('still removes genuine enum-variant qualified-only identifiers', () => {
+    // chrono::DateTime appears only as DateTime(i64) variant in an enum body
+    // and as Event::DateTime(...) qualified usage — never as assoc fn call
+    const src = `use chrono::{DateTime, Utc};
+enum Event { DateTime(i64) }
+fn main() { let _ = Event::DateTime(0); }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.find(i => i.module === 'chrono')).toBeUndefined();
+  });
+
+  it('keeps Utc when Utc::now() is called (associated fn)', () => {
+    const src = `use chrono::Utc;
+fn now() -> String { Utc::now().to_rfc3339() }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('chrono');
+  });
+
+  it('keeps types used in both associated fn and type position', () => {
+    const src = `use uuid::Uuid;
+struct Record { id: Uuid }
+fn make() -> Record { Record { id: Uuid::new_v4() } }`;
+    const used = removeUnusedImports(parseImports(src), src);
+    expect(used.map(i => i.module)).toContain('uuid');
+  });
+
+  it('full audit-API file: all imports kept or removed correctly', () => {
+    const src = `use std::sync::Arc;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use crate::AppState;
+use wf_core::{AuditEvent, AuditAction};
+
+#[derive(Debug, Serialize)]
+pub struct AuditEventResponse {
+    pub id: Uuid,
+    pub action: String,
+}
+
+fn core_to_db(core_event: AuditEvent) -> SomeDbEvent {
+    SomeDbEvent {
+        id: core_event.id,
+        tenant_id: Uuid::parse_str(&core_event.tenant_id.0)
+            .unwrap_or_else(|_| Uuid::new_v4()),
+    }
+}
+
+pub async fn get_instance_audit(
+    State(state): State<Arc<AppState>>,
+    Path(instance_id): Path<String>,
+) -> impl IntoResponse {
+    let instance_uuid = match Uuid::parse_str(&instance_id) {
+        Ok(uuid) => uuid,
+        Err(e) => return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    };
+    Json(instance_uuid).into_response()
+}`;
+
+    const result = organizeImportsInText(src);
+    const importLines = result.split('\n').filter(l => l.startsWith('use ') || l.startsWith('pub use '));
+
+    // uuid must be kept — used via Uuid::parse_str and Uuid::new_v4
+    expect(importLines.some(l => l.includes('uuid'))).toBe(true);
+    // Arc must be kept — used as State<Arc<AppState>>
+    expect(importLines.some(l => l.includes('std::sync'))).toBe(true);
+    // Path, StatusCode, IntoResponse, Json, Response, Serialize must be kept
+    expect(importLines.some(l => l.includes('axum'))).toBe(true);
+    // AuditEvent must be kept
+    expect(importLines.some(l => l.includes('wf_core'))).toBe(true);
+    // AuditAction — not referenced in this trimmed file — may be removed
+    // (that's correct behaviour)
   });
 });

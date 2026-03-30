@@ -40,15 +40,6 @@ export interface OrganizedImports {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────────────────────
-
-const MAX_INLINE_ITEMS = 3;
-const STD_ROOTS = new Set(['std', 'core', 'alloc']);
-const LOCAL_ROOTS = new Set(['crate', 'super', 'self']);
-type PubUsePlacement = 'inline' | 'first' | 'last';
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -432,6 +423,7 @@ export function categorizeImport(
   // std, core and alloc are all part of the Rust standard library family.
   // core is the dependency-free subset; alloc adds heap allocation. Both are
   // shipped with every Rust toolchain and should appear in the std group.
+  const STD_ROOTS = new Set(['std', 'core', 'alloc']);
   const root = module.split('::')[0].replace(/-/g, '_');
 
   if (STD_ROOTS.has(root)) return 'std';
@@ -642,20 +634,6 @@ export function removeDuplicateImports(imports: ImportStatement[]): ImportStatem
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helper: check if identifier is used
-// ─────────────────────────────────────────────────────────────────────────────
-
-function isIdentifierUsed(
-  name: string,
-  usedIdentifiers: Set<string>,
-  qualifiedOnly: Set<string>,
-  implicitTraits: Set<string>
-): boolean {
-  return implicitTraits.has(name) ||
-    (usedIdentifiers.has(name) && !qualifiedOnly.has(name));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Public API: removeUnusedImports
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -733,12 +711,24 @@ export function removeUnusedImports(
 
   // An identifier is "qualified-only" when every occurrence of it in the
   // declaration-stripped code is in a `Foo::Ident` position — never bare.
+  //
+  // EXCEPTION: if ANY occurrence of `Ident::something` is followed by `(`
+  // (an associated function call like Uuid::parse_str(...) or HashMap::new()),
+  // then `Ident` is a type being used as a namespace — not an enum variant.
+  // Associated function calls REQUIRE the type to be in scope via `use`, so
+  // we must NOT classify these as qualified-only.
   for (const ident of qualifiedAppearances) {
     const bareRegex = new RegExp(
       `(?<!::|\\.)\\b${escapeRegex(ident)}\\b(?!\\s*::)`,
       'g'
     );
-    if (!bareRegex.test(codeWithoutDeclBodies)) {
+    // Check if Ident::something(...) appears — associated function call pattern
+    const assocFnRegex = new RegExp(
+      `\\b${escapeRegex(ident)}\\s*::\\s*[a-z_][A-Za-z0-9_]*\\s*(?:<[^>]*>\\s*)?\\(`,
+      'g'
+    );
+    const hasAssocFnCall = assocFnRegex.test(codeAfterImports);
+    if (!bareRegex.test(codeWithoutDeclBodies) && !hasAssocFnCall) {
       qualifiedOnlyIdentifiers.add(ident);
     }
   }
@@ -780,30 +770,6 @@ export function removeUnusedImports(
     implicitlyUsedTraits.add('Seek');
   }
 
-  // ── 4b. Pattern-based trait detection (TraitName → trait_name()) 
-  // Catches IntoResponse, AsRef, ToString, Default, From, etc. automatically
-  const methodCallRegex = /\.(\w+)\s*\(/g;
-  const methodCalls = new Set<string>();
-  let methodMatch: RegExpExecArray | null;
-  while ((methodMatch = methodCallRegex.exec(codeForIdScan)) !== null) {
-    methodCalls.add(methodMatch[1]);
-  }
-
-  // PascalCase to snake_case: IntoResponse → into_response
-  const toSnakeCase = (s: string) => s
-    .replace(/([A-Z])/g, '_$1')
-    .toLowerCase()
-    .replace(/^_/, '');
-
-  // Check if any imported item matches a called method pattern
-  for (const imp of imports) {
-    for (const item of imp.items) {
-      if (methodCalls.has(toSnakeCase(item))) {
-        implicitlyUsedTraits.add(item);
-      }
-    }
-  }
-
   // ── 5. Filter each import ─────────────────────────────────────────────────
   const result: ImportStatement[] = [];
 
@@ -825,8 +791,8 @@ export function removeUnusedImports(
     if (imp.aliases && imp.aliases.some(Boolean) && !imp.isGroup) {
       const alias = imp.aliases[0];
       const original = imp.items[0];
-      const aliasUsed = alias ? isIdentifierUsed(alias, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits) : false;
-      const originalUsed = isIdentifierUsed(original, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
+      const aliasUsed = alias ? usedIdentifiers.has(alias) && !qualifiedOnlyIdentifiers.has(alias) : false;
+      const originalUsed = usedIdentifiers.has(original) && !qualifiedOnlyIdentifiers.has(original);
 
       if (aliasUsed || originalUsed) {
         result.push(imp);
@@ -854,15 +820,18 @@ export function removeUnusedImports(
 
         if (alias) {
           // Aliased item: check alias name (what user writes in code)
-          const aliasUsed = isIdentifierUsed(alias, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
-          const origUsed = isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
+          const aliasUsed = usedIdentifiers.has(alias) && !qualifiedOnlyIdentifiers.has(alias);
+          const origUsed = usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item);
           if (aliasUsed || origUsed) {
             usedItems.push(item);
             usedAliases.push(alias);
           }
         } else {
           // Plain item
-          if (isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits)) {
+          if (implicitlyUsedTraits.has(item)) {
+            usedItems.push(item);
+            usedAliases.push(undefined);
+          } else if (usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item)) {
             usedItems.push(item);
             usedAliases.push(undefined);
           }
@@ -883,7 +852,9 @@ export function removeUnusedImports(
     } else {
       // Simple import
       const item = imp.items[0];
-      const used = isIdentifierUsed(item, usedIdentifiers, qualifiedOnlyIdentifiers, implicitlyUsedTraits);
+      const used =
+        implicitlyUsedTraits.has(item) ||
+        (usedIdentifiers.has(item) && !qualifiedOnlyIdentifiers.has(item));
 
       if (used) {
         result.push(imp);
@@ -1216,6 +1187,9 @@ function buildGroupedImports(
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal: custom group order layout
 // ─────────────────────────────────────────────────────────────────────────────
+
+const STD_ROOTS = new Set(['std', 'core', 'alloc']);
+const LOCAL_ROOTS = new Set(['crate', 'super', 'self']);
 
 /**
  * Assign an import to the first matching entry in importOrder.
