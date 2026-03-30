@@ -22,6 +22,7 @@ All notable changes to the "rust-import-organizer" extension are documented in t
 ### Fixed
 - Fixed missing newline at end of `edge_cases.expected.rs`
 - Fixed edge cases fixture formatting
+- Fixed GitHub Actions workflow: publish job now downloads .vsix artifact before creating GitHub release
 
 ---
 
