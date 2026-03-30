@@ -21,18 +21,18 @@
 
 use std::io;
 use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::collections::HashMap;
 use std::collections::{HashMap as Map, HashSet as Set};
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File};
 // ═════════════════════════════════════════════════════════════════════════════
 // SCENARIO 2: Qualified-Only Enum Variants (Should Remove)
 // ═════════════════════════════════════════════════════════════════════════════
 // These appear ONLY as qualified enum variants, never as associated function calls
 use std::io::*;
+use std::io::{BufRead, Read as R, Write as W};
 use std::io::{BufRead};
 use std::io::BufRead;
-use std::io::{BufRead, Read as R, Write as W};
 // ═════════════════════════════════════════════════════════════════════════════
 // SCENARIO 3: Mixed Aliases and Plain Items in Groups
 // ═════════════════════════════════════════════════════════════════════════════
@@ -107,7 +107,7 @@ use crate::unix::AdvancedFeature;
 // SCENARIO 10: Edge Cases (Empty, Unbalanced, Extreme)
 // ═════════════════════════════════════════════════════════════════════════════
 
-use std::io::{}; // Empty braces - should handle gracefully
+ // Empty braces - should handle gracefully
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SCENARIO 11: Re-exports with Aliases
@@ -155,13 +155,13 @@ fn associated_function_calls() {
     // These are associated function calls - imports should be kept
     let uuid1 = Uuid::new_v4();
     let uuid2 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-    
+
     let map = HashMap::<String, i32>::new();
     let bmap = BTreeMap::<String, i32>::new();
-    
+
     let arc1 = Arc::new(42);
     let arc2 = Arc::clone(&arc1);
-    
+
     let path = PathBuf::from("/tmp/test");
 }
 
@@ -171,7 +171,7 @@ fn qualified_enum_variants() {
         DateTime(i64),
         Status(Status),
     }
-    
+
     let _e1 = Event::DateTime(0);
     let _e2 = Event::Status(Status::Active);
 }
@@ -179,11 +179,11 @@ fn qualified_enum_variants() {
 fn mixed_aliases_and_plain() {
     // Keep JsonValue and json (JsonValue used, json! macro used)
     let val: JsonValue = json!({"key": "value"});
-    
+
     // Keep Read as R and Write as W (aliases used)
     let _: R = unimplemented!();
     let _: W = unimplemented!();
-    
+
     // Keep BufRead (used directly)
     let cursor = std::io::Cursor::new("test");
     for _line in cursor.lines() {}
@@ -196,7 +196,7 @@ fn multi_level_nesting() {
     let _: IoRead = unimplemented!();
     let _: IoWrite = unimplemented!();
     let _f = File::open("test").unwrap();
-    
+
     // From a::b::*
     let _: NestedItem = unimplemented!();
     let _: Feature = unimplemented!();
@@ -258,27 +258,27 @@ fn implicit_traits_test() {
     // Context - used via .context()
     let result: Result<(), &'static str> = Err("error");
     let _ = result.context("failed");
-    
+
     // Read - used via .read()
     let mut buf = [0u8; 100];
     let _ = std::io::Cursor::new(&buf[..]).read(&mut buf);
-    
+
     // Write - used via .write_all()
     let mut v = Vec::new();
     v.write_all(b"test").unwrap();
-    
+
     // BufRead - used via .lines()
     let cursor = std::io::Cursor::new("line1\nline2");
     for _line in cursor.lines() {}
-    
+
     // Seek - used via .seek()
     let mut cursor = std::io::Cursor::new(vec![0u8; 10]);
     cursor.seek(std::io::SeekFrom::Start(0)).unwrap();
-    
+
     // Row - used via .get() (hypothetical sqlx usage)
     // let row: sqlx::Row = ...;
     // let _val = row.get("column");
-    
+
     // Executor - used via .execute() (hypothetical sqlx usage)
     // pool.execute(query).await;
 }
