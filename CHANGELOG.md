@@ -2,6 +2,30 @@
 
 All notable changes to the "rust-import-organizer" extension are documented in this file.
 
+## [0.2.9] - 2026-03-30
+
+### Added
+
+**New test fixtures**
+- Added `edge_cases` test fixture covering import parsing edge cases
+- Added `uuid` test fixture for UUID import handling
+- Added generated test fixtures for rust-test integration project
+
+**Packaging improvements**
+- Added `.vscodeignore` to exclude unnecessary files from extension package (test fixtures, docs, scripts)
+- Updated to use `@vscode/vsce` for packaging
+
+### Changed
+- Refactored and simplified `importParser.ts` implementation
+- Updated import parser tests with comprehensive edge case coverage (177+ new test cases)
+
+### Fixed
+- Fixed missing newline at end of `edge_cases.expected.rs`
+- Fixed edge cases fixture formatting
+
+---
+
+
 ## [0.2.8] - 2026-03-23
 
 ### Added

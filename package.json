@@ -5,7 +5,7 @@
   "publisher": "hugomartinezf",
   "icon": "icon.png",
   "repository": "https://github.com/hugomf/vscode-rust-oi",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "engines": {
     "vscode": "^1.85.0"
   },
